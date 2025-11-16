@@ -48,4 +48,24 @@ models:
   har_rv:
     horizons: [1, 5, 22]
 
+  lstm:
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.2
+    sequence_length: 20
+    batch_size: 256
+    learning_rate: 0.001
+    epochs: 50
+    patience: 10
+
+  tcn:
+    num_channels: [32, 64, 128]
+    kernel_size: 3
+    dropout: 0.2
+    sequence_length: 20
+    batch_size: 256
+    learning_rate: 0.001
+    epochs: 50
+    patience: 10
+
 random_seed: 42
