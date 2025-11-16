@@ -61,6 +61,7 @@ def train_model_for_instrument(
     instrument: str,
     config: dict,
     device: str = "cpu",
+    show_progress: bool = True,
 ):
 
     feature_cols = get_feature_columns(train_df)
@@ -122,13 +123,15 @@ def train_model_for_instrument(
         train_loader,
         val_loader,
         epochs=model_config["epochs"],
-        callbacks=[early_stopping, lambda loss: checkpoint(model, {"val_loss": loss})],
+        early_stopping=early_stopping,
+        checkpoint=checkpoint,
         verbose=False,
+        show_progress=show_progress,
     )
 
     checkpoint.load_best_model(model)
 
-    val_preds = trainer.predict(val_loader)
+    val_preds = trainer.predict(val_loader, show_progress=False)
     val_targets = []
     for _, y in val_loader:
         val_targets.extend(y.numpy().flatten())
@@ -145,6 +148,7 @@ def train_all_models(
     instruments: list,
     config: dict,
     device: str = "cpu",
+    show_progress: bool = True,
 ):
 
     results = []
@@ -156,7 +160,7 @@ def train_all_models(
             print(f"  {instrument}")
 
             metrics, history = train_model_for_instrument(
-                model_type, train_df, val_df, instrument, config, device
+                model_type, train_df, val_df, instrument, config, device, show_progress
             )
 
             result = {
@@ -191,7 +195,9 @@ def main():
     instruments = config["data"]["instruments"]
     print(f"Training for {len(instruments)} instruments")
 
-    results_df = train_all_models(train_df, val_df, instruments, config, device)
+    results_df = train_all_models(
+        train_df, val_df, instruments, config, device, show_progress=True
+    )
 
     print("Training complete")
 

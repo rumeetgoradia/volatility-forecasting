@@ -1,4 +1,4 @@
-# Temporal Convolutional Network for volatility forecasting
+#  Temporal Convolutional Network for volatility forecasting
 
 import torch
 import torch.nn as nn
@@ -48,13 +48,20 @@ class TemporalBlock(nn.Module):
             nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
         )
         self.relu = nn.ReLU()
+        self.padding = padding
 
     def forward(self, x):
         out = self.net(x)
+
+        if self.padding > 0:
+            out = out[:, :, : -self.padding]
+
         res = x if self.downsample is None else self.downsample(x)
 
-        if out.size(2) != res.size(2):
+        if out.size(2) < res.size(2):
             res = res[:, :, : out.size(2)]
+        elif out.size(2) > res.size(2):
+            out = out[:, :, : res.size(2)]
 
         return self.relu(out + res)
 
