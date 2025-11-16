@@ -19,11 +19,13 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
 # Virtual environments
 venv/
 env/
 ENV/
 .venv/
+
 # IDEs
 .vscode/
 .idea/
@@ -31,9 +33,7 @@ ENV/
 *.swo
 *~
 .DS_Store
-# Jupyter
-.ipynb_checkpoints/
-*.ipynb
+
 # Data files
 data/raw/*.parquet
 data/raw/*.csv
@@ -41,22 +41,12 @@ data/processed/*.parquet
 data/processed/*.csv
 data/features/*.parquet
 data/features/*.csv
-# Model outputs
-outputs/models/*.pkl
-outputs/models/*.pt
-outputs/models/*.pth
-outputs/models/*.h5
-outputs/results/*.csv
-outputs/results/*.json
-outputs/figures/*.png
-outputs/figures/*.jpg
-outputs/figures/*.pdf
+
 # Logs
 *.log
 logs/
 tensorboard/
-# Config (uncomment if you want to ignore local configs)
-# config/local_config.yaml
+
 # OS
 .DS_Store
 Thumbs.db

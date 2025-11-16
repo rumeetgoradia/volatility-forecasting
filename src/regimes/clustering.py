@@ -1,0 +1,138 @@
+# Regime detection using HMM and k-means clustering on volatility features
+
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from hmmlearn import hmm
+from typing import Tuple, Optional, List
+
+
+class RegimeDetector:
+    def __init__(self, method: str = "hmm", n_regimes: int = 3):
+        self.method = method
+        self.n_regimes = n_regimes
+        self.model = None
+        self.scaler = StandardScaler()
+        self.regime_names = {0: "Low", 1: "Medium", 2: "High"}
+
+    def fit(self, features: np.ndarray, **kwargs) -> "RegimeDetector":
+        features_scaled = self.scaler.fit_transform(features)
+
+        if self.method == "hmm":
+            self.model = self._fit_hmm(features_scaled, **kwargs)
+        elif self.method == "kmeans":
+            self.model = self._fit_kmeans(features_scaled, **kwargs)
+        else:
+            raise ValueError(f"Unknown method: {self.method}")
+
+        return self
+
+    def _fit_hmm(self, features: np.ndarray, **kwargs) -> hmm.GaussianHMM:
+        n_components = kwargs.get("n_components", self.n_regimes)
+        covariance_type = kwargs.get("covariance_type", "full")
+        n_iter = kwargs.get("n_iter", 100)
+        random_state = kwargs.get("random_state", 42)
+
+        model = hmm.GaussianHMM(
+            n_components=n_components,
+            covariance_type=covariance_type,
+            n_iter=n_iter,
+            random_state=random_state,
+        )
+
+        model.fit(features)
+        return model
+
+    def _fit_kmeans(self, features: np.ndarray, **kwargs) -> KMeans:
+        n_clusters = kwargs.get("n_clusters", self.n_regimes)
+        n_init = kwargs.get("n_init", 10)
+        random_state = kwargs.get("random_state", 42)
+
+        model = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=random_state)
+
+        model.fit(features)
+        return model
+
+    def predict(self, features: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        features_scaled = self.scaler.transform(features)
+
+        if self.method == "hmm":
+            regimes = self.model.predict(features_scaled)
+        elif self.method == "kmeans":
+            regimes = self.model.predict(features_scaled)
+
+        regimes = self._reorder_regimes(features, regimes)
+
+        return regimes
+
+    def _reorder_regimes(self, features: np.ndarray, regimes: np.ndarray) -> np.ndarray:
+        regime_means = []
+        for i in range(self.n_regimes):
+            mask = regimes == i
+            if mask.sum() > 0:
+                regime_means.append(features[mask, 0].mean())
+            else:
+                regime_means.append(0)
+
+        sorted_indices = np.argsort(regime_means)
+        mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_indices)}
+
+        reordered = np.array([mapping[r] for r in regimes])
+        return reordered
+
+    def fit_predict(self, features: np.ndarray, **kwargs) -> np.ndarray:
+        self.fit(features, **kwargs)
+        return self.predict(features)
+
+
+def detect_regimes_for_instrument(
+    df: pd.DataFrame,
+    instrument: str,
+    feature_cols: List[str],
+    method: str = "hmm",
+    n_regimes: int = 3,
+    **kwargs,
+) -> pd.DataFrame:
+
+    inst_df = df[df["Future"] == instrument].copy()
+    inst_df = inst_df.sort_values("datetime").reset_index(drop=True)
+
+    features = inst_df[feature_cols].values
+    mask = ~np.isnan(features).any(axis=1)
+
+    detector = RegimeDetector(method=method, n_regimes=n_regimes)
+
+    regimes_clean = detector.fit_predict(features[mask], **kwargs)
+
+    regimes = np.full(len(inst_df), -1)
+    regimes[mask] = regimes_clean
+
+    inst_df["regime"] = regimes
+
+    return inst_df[["datetime", "Future", "regime"]]
+
+
+def detect_regimes_all_instruments(
+    df: pd.DataFrame,
+    instruments: List[str],
+    feature_cols: List[str],
+    method: str = "hmm",
+    n_regimes: int = 3,
+    **kwargs,
+) -> pd.DataFrame:
+
+    all_regimes = []
+
+    for instrument in instruments:
+        print(f"Detecting regimes for {instrument}")
+        regime_df = detect_regimes_for_instrument(
+            df, instrument, feature_cols, method, n_regimes, **kwargs
+        )
+        all_regimes.append(regime_df)
+
+    combined = pd.concat(all_regimes, ignore_index=True)
+    return combined

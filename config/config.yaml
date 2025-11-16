@@ -2,6 +2,7 @@ data:
   raw_path: "data/raw/futures_data.parquet"
   processed_path: "data/processed/"
   features_path: "data/features/"
+  regimes_path: "data/regimes/"
 
   instruments:
     - "INDX.CAC"
@@ -66,6 +67,44 @@ models:
     batch_size: 256
     learning_rate: 0.001
     epochs: 50
+    patience: 10
+
+regimes:
+  method: "hmm"
+  n_regimes: 3
+  features:
+    - "RV_1D"
+    - "volume_log"
+
+  hmm:
+    n_components: 3
+    covariance_type: "full"
+    n_iter: 100
+    random_state: 42
+
+  kmeans:
+    n_clusters: 3
+    n_init: 10
+    random_state: 42
+
+moe:
+  experts:
+    - "har_rv"
+    - "lstm"
+    - "tcn"
+
+  gating:
+    hidden_size: 32
+    num_layers: 2
+    dropout: 0.1
+    use_regime_supervision: true
+
+  training:
+    freeze_experts: true
+    joint_finetune: false
+    batch_size: 256
+    learning_rate: 0.001
+    epochs: 30
     patience: 10
 
 random_seed: 42
