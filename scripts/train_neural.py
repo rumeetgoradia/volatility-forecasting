@@ -1,4 +1,4 @@
-# Training script for LSTM and TCN models with per-instrument evaluation
+# Training script for LSTM and TCN models with resumable progress tracking
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import sys
 import yaml
+import argparse
 
 sys.path.append("src")
 from data.dataset import create_datasets
@@ -15,6 +16,7 @@ from models.lstm import LSTMModel
 from models.tcn import TCNModel
 from training.trainer import Trainer
 from training.callbacks import EarlyStopping, ModelCheckpoint
+from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
 
 
@@ -149,37 +151,107 @@ def train_all_models(
     config: dict,
     device: str = "cpu",
     show_progress: bool = True,
+    resume: bool = True,
+    model_types: list = ["lstm", "tcn"],
 ):
 
-    results = []
+    progress = ProgressTracker()
 
-    for model_type in ["lstm", "tcn"]:
-        print(f"Training {model_type.upper()} models")
+    if not resume:
+        for model_type in model_types:
+            progress.clear(model_type)
+        print("Starting fresh training")
+    else:
+        print(progress.summary())
 
-        for instrument in instruments:
+    for model_type in model_types:
+        print(f"\nTraining {model_type.upper()} models")
+
+        pending = progress.get_pending(model_type, instruments)
+
+        if not pending:
+            print(f"All {model_type.upper()} models already completed")
+            continue
+
+        print(f"Pending instruments: {', '.join(pending)}")
+
+        for instrument in pending:
             print(f"  {instrument}")
 
-            metrics, history = train_model_for_instrument(
-                model_type, train_df, val_df, instrument, config, device, show_progress
-            )
+            try:
+                progress.mark_in_progress(model_type, instrument)
 
-            result = {
-                "model": model_type.upper(),
-                "instrument": instrument,
-                "val_rmse": metrics["rmse"],
-                "val_mae": metrics["mae"],
-                "val_qlike": metrics["qlike"],
-                "val_r2": metrics["r2"],
-                "n_samples": metrics["n_samples"],
-            }
-            results.append(result)
+                metrics, history = train_model_for_instrument(
+                    model_type,
+                    train_df,
+                    val_df,
+                    instrument,
+                    config,
+                    device,
+                    show_progress,
+                )
 
-            print(f"    Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}")
+                progress.mark_completed(model_type, instrument, metrics)
 
-    return pd.DataFrame(results)
+                print(
+                    f"    Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}"
+                )
+
+            except KeyboardInterrupt:
+                print("\nTraining interrupted by user")
+                print("Progress has been saved")
+                print(f"Resume with: python scripts/train_neural.py --resume")
+                sys.exit(0)
+
+            except Exception as e:
+                error_msg = str(e)
+                progress.mark_failed(model_type, instrument, error_msg)
+                print(f"    Failed: {error_msg}")
+                continue
+
+    results_df = progress.get_results_dataframe()
+    return results_df
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Train neural models for volatility forecasting"
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Resume from last checkpoint (default: True)",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
+    )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="lstm,tcn",
+        help="Comma-separated list of models to train (default: lstm,tcn)",
+    )
+    parser.add_argument(
+        "--instruments",
+        type=str,
+        default=None,
+        help="Comma-separated list of instruments to train (default: all)",
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Show training progress and exit"
+    )
+
+    args = parser.parse_args()
+
+    if args.status:
+        progress = ProgressTracker()
+        print(progress.summary())
+        return
+
+    resume = args.resume and not args.fresh
+    model_types = [m.strip() for m in args.models.split(",")]
+
     print("NEURAL MODELS TRAINING")
 
     config = load_config()
@@ -192,14 +264,29 @@ def main():
     print(f"Train: {len(train_df)} records")
     print(f"Val: {len(val_df)} records")
 
-    instruments = config["data"]["instruments"]
-    print(f"Training for {len(instruments)} instruments")
+    if args.instruments:
+        instruments = [i.strip() for i in args.instruments.split(",")]
+        print(f"Training only: {', '.join(instruments)}")
+    else:
+        instruments = config["data"]["instruments"]
+        print(f"Training for {len(instruments)} instruments")
 
     results_df = train_all_models(
-        train_df, val_df, instruments, config, device, show_progress=True
+        train_df,
+        val_df,
+        instruments,
+        config,
+        device,
+        show_progress=True,
+        resume=resume,
+        model_types=model_types,
     )
 
-    print("Training complete")
+    if len(results_df) == 0:
+        print("No results to save")
+        return
+
+    print("\nTraining complete")
 
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
@@ -208,7 +295,7 @@ def main():
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
-    print("Results by model")
+    print("\nResults by model")
     for model in results_df["model"].unique():
         model_results = results_df[results_df["model"] == model]
         print(f"{model}:")
@@ -221,15 +308,17 @@ def main():
     if baseline_file.exists():
         baseline_df = pd.read_csv(baseline_file)
 
-        print("Comparison with HAR-RV baseline")
+        print("\nComparison with HAR-RV baseline")
         print("Model       Avg Val RMSE")
         print(f"HAR-RV      {baseline_df['val_rmse'].mean():.6f}")
-        print(
-            f"LSTM        {results_df[results_df['model']=='LSTM']['val_rmse'].mean():.6f}"
-        )
-        print(
-            f"TCN         {results_df[results_df['model']=='TCN']['val_rmse'].mean():.6f}"
-        )
+        if "LSTM" in results_df["model"].values:
+            print(
+                f"LSTM        {results_df[results_df['model']=='LSTM']['val_rmse'].mean():.6f}"
+            )
+        if "TCN" in results_df["model"].values:
+            print(
+                f"TCN         {results_df[results_df['model']=='TCN']['val_rmse'].mean():.6f}"
+            )
 
 
 if __name__ == "__main__":

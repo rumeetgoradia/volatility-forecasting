@@ -88,8 +88,11 @@ python scripts/train_baseline.py
 **Output:**
 - `outputs/models/har_rv_*.pkl` - Saved HAR-RV models
 - `outputs/results/baseline_results.csv` - Performance metrics
+- `outputs/progress/baseline_training.json` - Progress tracker
 
 **Expected runtime:** 1-2 minutes
+
+**Resume capability:** If interrupted, run the same command to resume from where it stopped.
 
 ### Step 3: Train Neural Models
 
@@ -103,8 +106,11 @@ python scripts/train_neural.py
 - `outputs/models/lstm_*.pt` - Saved LSTM models
 - `outputs/models/tcn_*.pt` - Saved TCN models
 - `outputs/results/neural_results.csv` - Performance metrics
+- `outputs/progress/training_progress.json` - Progress tracker
 
 **Expected runtime:** 10-30 minutes (faster with GPU)
+
+**Resume capability:** Training is fully resumable. If interrupted, simply run the same command again.
 
 ### Step 4: Detect Market Regimes
 
@@ -134,9 +140,101 @@ python scripts/train_moe.py
 **Output:**
 - `outputs/models/moe_*.pt` - Saved MoE models
 - `outputs/results/moe_results.csv` - Performance metrics
+- `outputs/progress/moe_training.json` - Progress tracker
 - Console output comparing all models
 
 **Expected runtime:** 10-20 minutes
+
+**Resume capability:** Fully resumable. Interrupted training can be continued with the same command.
+
+## Advanced Usage
+
+### Resumable Training
+
+All training scripts support automatic resume functionality:
+
+```bash
+# Training is interrupted (Ctrl+C, crash, etc.)
+python scripts/train_neural.py
+# ... interrupted ...
+
+# Simply run again - automatically resumes from last completed model
+python scripts/train_neural.py
+```
+
+### Check Training Progress
+
+View current training status without starting new training:
+
+```bash
+# Check HAR-RV progress
+python scripts/train_baseline.py --status
+
+# Check neural models progress
+python scripts/train_neural.py --status
+
+# Check MoE progress
+python scripts/train_moe.py --status
+```
+
+**Example output:**
+```
+Training Progress:
+
+LSTM:
+  Completed: 3
+    INDX.CAC: RMSE=0.000623
+    INDX.SPX: RMSE=0.000701
+    INDX.TPX: RMSE=0.000689
+  In Progress: INDX.UKX
+  Failed: 0
+
+TCN:
+  Completed: 2
+    INDX.CAC: RMSE=0.000612
+    INDX.SPX: RMSE=0.000689
+```
+
+### Fresh Start
+
+Ignore previous progress and start training from scratch:
+
+```bash
+python scripts/train_baseline.py --fresh
+python scripts/train_neural.py --fresh
+python scripts/train_moe.py --fresh
+```
+
+### Train Specific Instruments
+
+Train only selected instruments instead of all:
+
+```bash
+# Train only S&P 500 and CAC 40
+python scripts/train_baseline.py --instruments INDX.SPX,INDX.CAC
+python scripts/train_neural.py --instruments INDX.SPX,INDX.CAC
+python scripts/train_moe.py --instruments INDX.SPX,INDX.CAC
+```
+
+### Train Specific Models
+
+For neural models, train only LSTM or TCN:
+
+```bash
+# Train only LSTM
+python scripts/train_neural.py --models lstm
+
+# Train only TCN
+python scripts/train_neural.py --models tcn
+```
+
+### Combined Options
+
+Combine multiple options:
+
+```bash
+# Fresh LSTM training for specific instruments
+python scripts/train_neural.py --fresh --models lstm --instruments INDX.SPX,INDX.CAC
 
 ## Results
 
@@ -191,28 +289,6 @@ Edit `config/config.yaml` to customize:
 - **Model hyperparameters**: Hidden sizes, learning rates, etc.
 - **Regime detection**: Number of regimes, HMM vs k-means
 - **MoE settings**: Expert selection, gating network architecture
-
-## Troubleshooting
-
-### Memory Issues
-
-If you run out of memory:
-1. Reduce batch size in `config.yaml`
-2. Process fewer instruments at once
-3. Use smaller sequence lengths
-
-### GPU Issues
-
-If GPU training fails:
-- Models will automatically fall back to CPU
-- Training will be slower but still work
-
-### Missing Data
-
-If you get "File not found" errors:
-- Ensure data file is in `data/raw/`
-- Check that previous pipeline steps completed successfully
-- Verify paths in `config/config.yaml`
 
 ## Key Features
 

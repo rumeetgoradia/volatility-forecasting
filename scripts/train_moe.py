@@ -1,4 +1,4 @@
-# Train Mixture-of-Experts model combining HAR-RV, LSTM, and TCN experts
+# Train Mixture-of-Experts model with resumable progress tracking
 
 import torch
 import torch.nn as nn
@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import sys
 import yaml
+import argparse
 
 sys.path.append("src")
 from data.dataset import create_datasets
@@ -15,6 +16,7 @@ from models.moe import MixtureOfExperts, load_expert_models
 from models.gating import GatingNetwork, SupervisedGatingNetwork
 from training.trainer import Trainer
 from training.callbacks import EarlyStopping, ModelCheckpoint
+from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
 
 
@@ -105,8 +107,7 @@ def train_moe_for_instrument(
     expert_models = all_experts.get(instrument, {})
 
     if len(expert_models) == 0:
-        print(f"No expert models found for {instrument}")
-        return None, None
+        raise ValueError(f"No expert models found for {instrument}")
 
     print(f"Loaded {len(expert_models)} experts: {list(expert_models.keys())}")
 
@@ -182,33 +183,84 @@ def train_all_moe(
     instruments: list,
     config: dict,
     device: str = "cpu",
+    resume: bool = True,
 ):
 
-    results = []
+    progress = ProgressTracker(progress_file="outputs/progress/moe_training.json")
 
-    for instrument in instruments:
-        metrics, history = train_moe_for_instrument(
-            train_df, val_df, instrument, config, device
-        )
+    if not resume:
+        progress.clear("moe")
+        print("Starting fresh training")
+    else:
+        print(progress.summary())
 
-        if metrics is not None:
-            result = {
-                "model": "MoE",
-                "instrument": instrument,
-                "val_rmse": metrics["rmse"],
-                "val_mae": metrics["mae"],
-                "val_qlike": metrics["qlike"],
-                "val_r2": metrics["r2"],
-                "n_samples": metrics["n_samples"],
-            }
-            results.append(result)
+    pending = progress.get_pending("moe", instruments)
+
+    if not pending:
+        print("All MoE models already completed")
+        results_df = progress.get_results_dataframe()
+        return results_df
+
+    print(f"Pending instruments: {', '.join(pending)}")
+
+    for instrument in pending:
+        try:
+            progress.mark_in_progress("moe", instrument)
+
+            metrics, history = train_moe_for_instrument(
+                train_df, val_df, instrument, config, device
+            )
+
+            progress.mark_completed("moe", instrument, metrics)
 
             print(f"  Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}")
 
-    return pd.DataFrame(results)
+        except KeyboardInterrupt:
+            print("\nTraining interrupted by user")
+            print("Progress has been saved")
+            print(f"Resume with: python scripts/train_moe.py --resume")
+            sys.exit(0)
+
+        except Exception as e:
+            error_msg = str(e)
+            progress.mark_failed("moe", instrument, error_msg)
+            print(f"  Failed: {error_msg}")
+            continue
+
+    results_df = progress.get_results_dataframe()
+    return results_df
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train Mixture-of-Experts models")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Resume from last checkpoint (default: True)",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
+    )
+    parser.add_argument(
+        "--instruments",
+        type=str,
+        default=None,
+        help="Comma-separated list of instruments to train (default: all)",
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Show training progress and exit"
+    )
+
+    args = parser.parse_args()
+
+    if args.status:
+        progress = ProgressTracker(progress_file="outputs/progress/moe_training.json")
+        print(progress.summary())
+        return
+
+    resume = args.resume and not args.fresh
+
     print("MIXTURE-OF-EXPERTS TRAINING")
 
     config = load_config()
@@ -228,12 +280,22 @@ def main():
     print(f"Train: {len(train_df)} records")
     print(f"Val: {len(val_df)} records")
 
-    instruments = config["data"]["instruments"]
-    print(f"Training MoE for {len(instruments)} instruments")
+    if args.instruments:
+        instruments = [i.strip() for i in args.instruments.split(",")]
+        print(f"Training only: {', '.join(instruments)}")
+    else:
+        instruments = config["data"]["instruments"]
+        print(f"Training MoE for {len(instruments)} instruments")
 
-    results_df = train_all_moe(train_df, val_df, instruments, config, device)
+    results_df = train_all_moe(
+        train_df, val_df, instruments, config, device, resume=resume
+    )
 
-    print("Training complete")
+    if len(results_df) == 0:
+        print("No results to save")
+        return
+
+    print("\nTraining complete")
 
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
@@ -242,7 +304,7 @@ def main():
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
-    print("MoE Performance")
+    print("\nMoE Performance")
     print(f"  Average Val RMSE: {results_df['val_rmse'].mean():.6f}")
     print(f"  Average Val MAE: {results_df['val_mae'].mean():.6f}")
     print(f"  Average Val QLIKE: {results_df['val_qlike'].mean():.6f}")

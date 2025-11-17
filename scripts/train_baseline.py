@@ -1,12 +1,16 @@
+# Training script for HAR-RV baseline with resumable progress tracking
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import sys
 import yaml
+import argparse
 
 sys.path.append("src")
 from models.har_rv import HARRV
-from evaluation.metrics import compute_all_metrics, evaluate_by_instrument
+from training.progress_tracker import ProgressTracker
+from evaluation.metrics import compute_all_metrics
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -24,82 +28,151 @@ def load_data(config: dict):
     return train_df, val_df, test_df
 
 
-def train_har_rv_per_instrument(
+def train_har_rv_for_instrument(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
-    instruments: list,
+    instrument: str,
     target_col: str = "RV_1D",
     output_dir: Path = Path("outputs/models"),
 ):
+
+    train_inst = train_df[train_df["Future"] == instrument].copy()
+    val_inst = val_df[val_df["Future"] == instrument].copy()
+
+    X_train = train_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
+    y_train = train_inst[target_col]
+
+    X_val = val_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
+    y_val = val_inst[target_col]
+
+    mask_train = X_train.notna().all(axis=1) & y_train.notna()
+    mask_val = X_val.notna().all(axis=1) & y_val.notna()
+
+    X_train_clean = X_train[mask_train]
+    y_train_clean = y_train[mask_train]
+    X_val_clean = X_val[mask_val]
+    y_val_clean = y_val[mask_val]
+
+    model = HARRV(name=f"HAR-RV_{instrument}")
+    model.fit(X_train_clean, y_train_clean)
+
+    y_train_pred = model.predict(X_train_clean)
+    y_val_pred = model.predict(X_val_clean)
+
+    train_metrics = compute_all_metrics(y_train_clean, y_train_pred)
+    val_metrics = compute_all_metrics(y_val_clean, y_val_pred)
+
+    model_path = output_dir / f"har_rv_{instrument}.pkl"
+    model.save(str(model_path))
+
+    return train_metrics, val_metrics
+
+
+def train_all_har_rv(
+    train_df: pd.DataFrame, val_df: pd.DataFrame, instruments: list, resume: bool = True
+):
+
+    progress = ProgressTracker(progress_file="outputs/progress/baseline_training.json")
+
+    if not resume:
+        progress.clear("har_rv")
+        print("Starting fresh training")
+    else:
+        print(progress.summary())
+
+    output_dir = Path("outputs/models")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    results = []
-    models = {}
+    pending = progress.get_pending("har_rv", instruments)
 
-    for instrument in instruments:
+    if not pending:
+        print("All HAR-RV models already completed")
+        results_df = progress.get_results_dataframe()
+        return results_df
+
+    print(f"Pending instruments: {', '.join(pending)}")
+
+    for instrument in pending:
         print(f"Training HAR-RV for {instrument}")
 
-        train_inst = train_df[train_df["Future"] == instrument].copy()
-        val_inst = val_df[val_df["Future"] == instrument].copy()
+        try:
+            progress.mark_in_progress("har_rv", instrument)
 
-        X_train = train_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
-        y_train = train_inst[target_col]
+            train_metrics, val_metrics = train_har_rv_for_instrument(
+                train_df, val_df, instrument, output_dir=output_dir
+            )
 
-        X_val = val_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
-        y_val = val_inst[target_col]
+            metrics = {
+                "rmse": val_metrics["rmse"],
+                "mae": val_metrics["mae"],
+                "qlike": val_metrics["qlike"],
+                "r2": val_metrics["r2"],
+                "n_samples": val_metrics["n_samples"],
+                "train_rmse": train_metrics["rmse"],
+                "train_mae": train_metrics["mae"],
+            }
 
-        mask_train = X_train.notna().all(axis=1) & y_train.notna()
-        mask_val = X_val.notna().all(axis=1) & y_val.notna()
+            progress.mark_completed("har_rv", instrument, metrics)
 
-        X_train_clean = X_train[mask_train]
-        y_train_clean = y_train[mask_train]
-        X_val_clean = X_val[mask_val]
-        y_val_clean = y_val[mask_val]
+            print(
+                f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}"
+            )
+            print(
+                f"  Train MAE: {train_metrics['mae']:.6f}, Val MAE: {val_metrics['mae']:.6f}"
+            )
+            print(
+                f"  Train QLIKE: {train_metrics['qlike']:.6f}, Val QLIKE: {val_metrics['qlike']:.6f}"
+            )
+            print(f"  Saved model to {output_dir / f'har_rv_{instrument}.pkl'}")
 
-        model = HARRV(name=f"HAR-RV_{instrument}")
-        model.fit(X_train_clean, y_train_clean)
+        except KeyboardInterrupt:
+            print("\nTraining interrupted by user")
+            print("Progress has been saved")
+            print(f"Resume with: python scripts/train_baseline.py --resume")
+            sys.exit(0)
 
-        y_train_pred = model.predict(X_train_clean)
-        y_val_pred = model.predict(X_val_clean)
+        except Exception as e:
+            error_msg = str(e)
+            progress.mark_failed("har_rv", instrument, error_msg)
+            print(f"  Failed: {error_msg}")
+            continue
 
-        train_metrics = compute_all_metrics(y_train_clean, y_train_pred)
-        val_metrics = compute_all_metrics(y_val_clean, y_val_pred)
-
-        result = {
-            "instrument": instrument,
-            "train_rmse": train_metrics["rmse"],
-            "train_mae": train_metrics["mae"],
-            "train_qlike": train_metrics["qlike"],
-            "train_r2": train_metrics["r2"],
-            "val_rmse": val_metrics["rmse"],
-            "val_mae": val_metrics["mae"],
-            "val_qlike": val_metrics["qlike"],
-            "val_r2": val_metrics["r2"],
-            "train_samples": train_metrics["n_samples"],
-            "val_samples": val_metrics["n_samples"],
-        }
-        results.append(result)
-
-        print(
-            f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}"
-        )
-        print(
-            f"  Train MAE: {train_metrics['mae']:.6f}, Val MAE: {val_metrics['mae']:.6f}"
-        )
-        print(
-            f"  Train QLIKE: {train_metrics['qlike']:.6f}, Val QLIKE: {val_metrics['qlike']:.6f}"
-        )
-
-        model_path = output_dir / f"har_rv_{instrument}.pkl"
-        model.save(str(model_path))
-        models[instrument] = model
-
-        print(f"  Saved model to {model_path}")
-
-    return pd.DataFrame(results), models
+    results_df = progress.get_results_dataframe()
+    return results_df
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train HAR-RV baseline models")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Resume from last checkpoint (default: True)",
+    )
+    parser.add_argument(
+        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
+    )
+    parser.add_argument(
+        "--instruments",
+        type=str,
+        default=None,
+        help="Comma-separated list of instruments to train (default: all)",
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="Show training progress and exit"
+    )
+
+    args = parser.parse_args()
+
+    if args.status:
+        progress = ProgressTracker(
+            progress_file="outputs/progress/baseline_training.json"
+        )
+        print(progress.summary())
+        return
+
+    resume = args.resume and not args.fresh
+
     print("HAR-RV BASELINE TRAINING")
 
     config = load_config()
@@ -110,12 +183,20 @@ def main():
     print(f"Val: {len(val_df)} records")
     print(f"Test: {len(test_df)} records")
 
-    instruments = config["data"]["instruments"]
-    print(f"Training for {len(instruments)} instruments")
+    if args.instruments:
+        instruments = [i.strip() for i in args.instruments.split(",")]
+        print(f"Training only: {', '.join(instruments)}")
+    else:
+        instruments = config["data"]["instruments"]
+        print(f"Training for {len(instruments)} instruments")
 
-    results_df, models = train_har_rv_per_instrument(train_df, val_df, instruments)
+    results_df = train_all_har_rv(train_df, val_df, instruments, resume=resume)
 
-    print("Training complete")
+    if len(results_df) == 0:
+        print("No results to save")
+        return
+
+    print("\nTraining complete")
 
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
@@ -124,7 +205,7 @@ def main():
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
-    print("Summary statistics")
+    print("\nSummary statistics")
     print(
         results_df[
             ["instrument", "val_rmse", "val_mae", "val_qlike", "val_r2"]
@@ -132,7 +213,7 @@ def main():
     )
 
     avg_metrics = results_df[["val_rmse", "val_mae", "val_qlike", "val_r2"]].mean()
-    print("Average validation metrics")
+    print("\nAverage validation metrics")
     for metric, value in avg_metrics.items():
         print(f"  {metric}: {value:.6f}")
 
