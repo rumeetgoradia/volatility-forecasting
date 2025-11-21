@@ -33,6 +33,9 @@ class ProgressTracker:
         if model_type not in self.progress:
             self.progress[model_type] = {}
 
+        # ensure all metrics are JSON-serializable
+        metrics = {k: float(v) for k, v in metrics.items()}
+
         self.progress[model_type][instrument] = {
             "status": "completed",
             "metrics": metrics,

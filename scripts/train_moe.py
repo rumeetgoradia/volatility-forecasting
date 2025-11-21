@@ -38,9 +38,16 @@ def load_data(config: dict):
 def load_regimes(config: dict):
     regimes_path = Path(config["data"]["regimes_path"])
 
-    train_regimes = pd.read_csv(regimes_path / "regime_labels_train.csv")
-    val_regimes = pd.read_csv(regimes_path / "regime_labels_val.csv")
-    test_regimes = pd.read_csv(regimes_path / "regime_labels_test.csv")
+    def _load(name: str) -> pd.DataFrame:
+        df = pd.read_csv(regimes_path / name)
+        # Parse with UTC, then convert to New York timezone for consistency
+        dt_utc = pd.to_datetime(df["datetime"], utc=True)
+        df["datetime"] = dt_utc.dt.tz_convert("America/New_York")
+        return df
+
+    train_regimes = _load("regime_labels_train.csv")
+    val_regimes = _load("regime_labels_val.csv")
+    test_regimes = _load("regime_labels_test.csv")
 
     return train_regimes, val_regimes, test_regimes
 
@@ -271,9 +278,17 @@ def main():
     print("Loading processed data")
     train_df, val_df, test_df = load_data(config)
 
+    # Convert processed data datetimes to New York timezone to match regimes
+    for df in (train_df, val_df, test_df):
+        if "datetime" in df.columns and hasattr(df["datetime"], "dt"):
+            # train/val/test parquet store tz-aware datetimes (Europe/Amsterdam)
+            df["datetime"] = df["datetime"].dt.tz_convert("America/New_York")
+
     print("Loading regime labels")
     train_regimes, val_regimes, test_regimes = load_regimes(config)
 
+    # Now datetimes are consistently tz-aware in America/New_York on both sides,
+    # so we can merge directly on datetime + Future.
     train_df = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
     val_df = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
 

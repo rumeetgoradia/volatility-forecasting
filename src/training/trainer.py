@@ -149,8 +149,8 @@ class Trainer:
 
             if early_stopping is not None:
                 if early_stopping(val_metrics["loss"]):
-                    if verbose:
-                        print(f"Early stopping at epoch {epoch+1}")
+                    # Always show when early stopping happens, even if verbose is False
+                    print(f"Early stopping at epoch {epoch+1}")
                     break
 
         return self.history
