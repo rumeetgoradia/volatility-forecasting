@@ -1,5 +1,3 @@
-# Mixture-of-Experts model combining multiple pretrained forecasting models
-
 import torch
 import torch.nn as nn
 import numpy as np
@@ -12,6 +10,7 @@ from models.gating import GatingNetwork, SupervisedGatingNetwork
 from models.har_rv import HARRV
 from models.lstm import LSTMModel
 from models.tcn import TCNModel
+from models.chronos import ChronosExpert 
 
 
 class MixtureOfExperts(nn.Module):
@@ -31,7 +30,7 @@ class MixtureOfExperts(nn.Module):
         self.gating = gating_network
 
         if freeze_experts:
-            for expert in self.experts.values():
+            for name, expert in self.experts.items():
                 for param in expert.parameters():
                     param.requires_grad = False
 
@@ -81,6 +80,8 @@ def load_expert_models(
 
     all_experts = {}
 
+    _shared_chronos_model = None
+
     for instrument in instruments:
         instrument_experts = {}
 
@@ -118,6 +119,16 @@ def load_expert_models(
                     model.to(device)
                     model.eval()
                     instrument_experts["tcn"] = model
+            
+            elif expert_name == "chronos":
+                #Check if Chronos model is in memory already
+                if _shared_chronos_model is None:
+                    model_name = config["models"].get("chronos", {}).get("model_name", "amazon/chronos-bolt-small")
+                    print(f"Initializing shared Chronos Expert: {model_name}...")
+                    _shared_chronos_model = ChronosExpert(model_name=model_name, device=device)
+                
+                #Using shared instance
+                instrument_experts["chronos"] = _shared_chronos_model
 
         all_experts[instrument] = instrument_experts
 
@@ -133,11 +144,11 @@ class HARRVWrapper(nn.Module):
     def forward(self, x):
         if isinstance(x, torch.Tensor):
             x_np = x.cpu().numpy()
+            #Handle batch dimension if needed
             if len(x_np.shape) == 3:
-                x_np = x_np[:, -1, :]
+                x_np = x_np[:, -1, :] #Take last timestep
 
             import pandas as pd
-
             x_df = pd.DataFrame(x_np, columns=self.get_feature_names(x_np.shape[1]))
 
             predictions = self.har_model.predict(x_df)
