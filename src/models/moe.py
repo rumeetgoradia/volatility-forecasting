@@ -36,7 +36,9 @@ class MixtureOfExperts(nn.Module):
                     param.requires_grad = False
 
     def forward(self, x, return_weights: bool = False):
-        gating_weights = self.gating(x)
+        # Use a 2D view for the gating network so its output matches expert outputs
+        gating_input = x[:, -1, :] if x.dim() == 3 else x
+        gating_weights = self.gating(gating_input)
 
         expert_outputs = []
         for name in self.expert_names:
