@@ -69,6 +69,13 @@ models:
     epochs: 50
     patience: 10
 
+  chronos:
+    model_name: "amazon/chronos-bolt-small"
+    device: "cuda"
+    prediction_length: 1
+    num_samples: 20         # Lower this to 10 if you hit Out-of-Memory (OOM)
+    context_length: 64
+
 regimes:
   method: "hmm"
   n_regimes: 3
@@ -92,6 +99,7 @@ moe:
     - "har_rv"
     - "lstm"
     - "tcn"
+    - "chronos"
 
   gating:
     hidden_size: 32
