@@ -1,9 +1,7 @@
 # Train Mixture-of-Experts model with Chronos Integration
-# Modified for LLM-Based GenAI Coursework
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pandas as pd
 import numpy as np
@@ -17,48 +15,43 @@ sys.path.append("src")
 from data.dataset import create_datasets
 from models.moe import load_expert_models
 from models.gating import GatingNetwork, SupervisedGatingNetwork
-from models.chronos_expert import ChronosExpert  # Import our new adapter
-from training.progress_tracker import ProgressTracker
+from models.chronos_expert import ChronosExpert
+from training.callbacks import EarlyStopping, ModelCheckpoint
+from training.progress_tracker import ProgressTracker 
 from evaluation.metrics import compute_all_metrics
 
-# --- 1. Define a Local Hybrid MoE Class ---
-# We define this here to handle the specific routing of Raw vs Scaled data
-# without needing to modify the core src/models/moe.py file.
 class HybridMoE(nn.Module):
     def __init__(self, expert_models, gating_network, freeze_experts=True):
         super().__init__()
         self.expert_models = nn.ModuleDict(expert_models)
         self.gating_network = gating_network
         
-        # Ensure standard experts are frozen if requested
         if freeze_experts:
             for name, model in self.expert_models.items():
-                # Chronos is already frozen in its own class, but we double check others
                 for param in model.parameters():
                     param.requires_grad = False
 
     def forward(self, x_scaled, x_raw):
-        # 1. Get weights from Gating Network (uses scaled features)
-        # gating_weights: [Batch, n_experts]
+        # Get weights from Gating Network
         gating_weights = self.gating_network(x_scaled)
         
-        # 2. Get Expert Outputs
+        # FIX: Handle Gating Networks that return 3D sequences [Batch, Seq, Experts]
+        # Aligned dimensions by taking the LAST timestep (most recent regime info)
+        if gating_weights.dim() == 3:
+            gating_weights = gating_weights[:, -1, :]
+        
         expert_outputs = []
         
         for name, expert in self.expert_models.items():
             if "chronos" in name.lower():
-                # Route RAW data to Chronos
                 out = expert(x_raw)
             else:
-                # Route SCALED data to LSTM/TCN/HAR
                 out = expert(x_scaled)
             expert_outputs.append(out)
             
         # Stack: [Batch, n_experts, 1]
         expert_outputs = torch.stack(expert_outputs, dim=1)
         
-        # 3. Weighted Sum
-        # weights: [Batch, n_experts, 1]
         weights = gating_weights.unsqueeze(-1)
         
         # Combined: [Batch, 1]
@@ -66,8 +59,7 @@ class HybridMoE(nn.Module):
         
         return final_output, gating_weights
 
-# --- Standard Utilities ---
-
+# Utils
 def load_config(config_path: str = "config/config.yaml") -> dict:
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
@@ -94,7 +86,7 @@ def get_feature_columns(df: pd.DataFrame) -> list:
                    "is_gap", "is_outlier", "regime"]
     return [col for col in df.columns if col not in exclude_cols]
 
-# --- Modified Training Function ---
+# Training Logic
 
 def train_moe_for_instrument(
     train_df: pd.DataFrame,
@@ -109,7 +101,7 @@ def train_moe_for_instrument(
     moe_config = config["moe"]
     sequence_length = config["models"]["lstm"]["sequence_length"]
 
-    # Create Datasets (Now returns 3 items: X, y, X_raw)
+    # Create Datasets (Returns 3-tuple: x_scaled, y, x_raw)
     train_dataset, val_dataset, _ = create_datasets(
         train_df, val_df, val_df, feature_cols=feature_cols,
         target_col="RV_1D", sequence_length=sequence_length,
@@ -121,28 +113,29 @@ def train_moe_for_instrument(
 
     input_size = train_dataset.get_feature_dim()
 
-    # 1. Load Standard Experts (LSTM/TCN/HAR)
-    # We catch the error if previous models aren't found to allow partial runs
+    # Load Standard Experts
     try:
         expert_models = load_expert_models(config, [instrument], input_size, device).get(instrument, {})
     except Exception as e:
-        print(f"Warning: Could not load baseline experts: {e}")
+        print(f"Warning: Could not load baseline experts (Check paths): {e}")
         expert_models = {}
 
-    # 2. Inject Chronos Expert
-    print("Initializing Chronos Expert...")
-    chronos_expert = ChronosExpert(
-        model_name="amazon/chronos-t5-small",
-        prediction_length=1,
-        num_samples=5, # Using 5 for speed as requested
-        device=device,
-        context_length=sequence_length
-    )
-    expert_models["chronos"] = chronos_expert
+    # Inject Chronos Expert
+    if "chronos" in moe_config["experts"]:
+        print("Initializing Chronos Expert...")
+        chronos_config = config["models"]["chronos"]
+        chronos_expert = ChronosExpert(
+            model_name=chronos_config["model_name"],
+            prediction_length=chronos_config["prediction_length"],
+            num_samples=chronos_config["num_samples"],
+            device=device,
+            context_length=sequence_length
+        )
+        expert_models["chronos"] = chronos_expert
 
     print(f"Active Experts: {list(expert_models.keys())}")
-
-    # 3. Initialize Gating Network
+    
+    # Initialize Gating
     use_supervision = moe_config["gating"]["use_regime_supervision"]
     n_experts = len(expert_models)
     
@@ -162,46 +155,43 @@ def train_moe_for_instrument(
             dropout=moe_config["gating"]["dropout"]
         )
 
-    # 4. Initialize Hybrid MoE
+    # Initialize Hybrid MoE
     moe_model = HybridMoE(
         expert_models=expert_models,
         gating_network=gating,
         freeze_experts=moe_config["training"]["freeze_experts"]
     ).to(device)
 
-    # Optimizer (Only trains the Gating Network because experts are frozen)
     optimizer = torch.optim.Adam(moe_model.parameters(), lr=moe_config["training"]["learning_rate"])
     criterion = nn.MSELoss()
 
-    # --- Custom Training Loop (Replaces standard Trainer) ---
-    best_val_loss = float('inf')
-    patience_counter = 0
+    # Setup Tracking & Callbacks
+    model_dir = Path("outputs/models")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = model_dir / f"moe_{instrument}.pt"
+
+    early_stopping = EarlyStopping(patience=moe_config["training"]["patience"])
+    checkpoint = ModelCheckpoint(str(checkpoint_path), monitor="val_loss", mode="min")
+    
     epochs = moe_config["training"]["epochs"]
-    
     history = {'train_loss': [], 'val_loss': []}
-    
+
     print("Starting Training Loop...")
     
+    # Custom Training Loop (Handling 3-tuple inputs)
     for epoch in range(epochs):
         moe_model.train()
         train_loss_accum = 0.0
         
-        # Progress bar for training
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
         
         for batch in pbar:
-            # UNPACK 3 ITEMS (The fix for the Dataset change)
+            # Unpack 3 items (The Hybrid Fix)
             x_scaled, y, x_raw = batch
-            
-            x_scaled = x_scaled.to(device)
-            y = y.to(device)
-            x_raw = x_raw.to(device) # Chronos expects raw data
+            x_scaled, y, x_raw = x_scaled.to(device), y.to(device), x_raw.to(device)
             
             optimizer.zero_grad()
-            
-            # Forward pass using Hybrid logic
             preds, _ = moe_model(x_scaled, x_raw)
-            
             loss = criterion(preds, y)
             loss.backward()
             optimizer.step()
@@ -227,26 +217,18 @@ def train_moe_for_instrument(
         
         print(f"Epoch {epoch+1}: Train Loss={avg_train_loss:.6f}, Val Loss={avg_val_loss:.6f}")
         
-        # Early Stopping & Checkpointing
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            patience_counter = 0
-            # Save best model
-            model_dir = Path("outputs/models")
-            model_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(moe_model.state_dict(), model_dir / f"moe_{instrument}.pt")
-        else:
-            patience_counter += 1
-            if patience_counter >= moe_config["training"]["patience"]:
-                print(f"Early stopping triggered after {epoch+1} epochs")
-                break
+        checkpoint(moe_model, {"val_loss": avg_val_loss})
+        early_stopping(avg_val_loss)
+        
+        if early_stopping.early_stop:
+            print(f"Early stopping triggered after {epoch+1} epochs")
+            break
 
-    # Final Evaluation
-    print("Calculating metrics on Validation set...")
-    # Load best weights
-    moe_model.load_state_dict(torch.load(model_dir / f"moe_{instrument}.pt"))
-    moe_model.eval()
+    # Load best model for final metrics
+    checkpoint.load_best_model(moe_model)
     
+    # Final Prediction
+    moe_model.eval()
     val_preds_list = []
     val_targets_list = []
     
@@ -261,33 +243,77 @@ def train_moe_for_instrument(
     return val_metrics, history
 
 def train_all_moe(train_df, val_df, instruments, config, device, resume=True):
-    # Simplified loop for the coursework
-    results = []
-    for inst in instruments:
-        metrics, _ = train_moe_for_instrument(train_df, val_df, inst, config, device)
-        metrics['instrument'] = inst
-        results.append(metrics)
-    return pd.DataFrame(results)
+    progress = ProgressTracker(progress_file="outputs/progress/moe_training.json")
+
+    if not resume:
+        progress.clear("moe")
+        print("Starting fresh training")
+    else:
+        print(progress.summary())
+
+    pending = progress.get_pending("moe", instruments)
+
+    if not pending:
+        print("All MoE models already completed")
+        return progress.get_results_dataframe()
+
+    print(f"Pending instruments: {', '.join(pending)}")
+
+    for instrument in pending:
+        try:
+            progress.mark_in_progress("moe", instrument)
+            
+            metrics, history = train_moe_for_instrument(
+                train_df, val_df, instrument, config, device
+            )
+            
+            progress.mark_completed("moe", instrument, metrics)
+            print(f"  Val RMSE: {metrics['rmse']:.6f}")
+
+        except KeyboardInterrupt:
+            print("\nTraining interrupted by user")
+            print("Progress has been saved. Resume with --resume")
+            sys.exit(0)
+        except Exception as e:
+            error_msg = str(e)
+            progress.mark_failed("moe", instrument, error_msg)
+            print(f"  Failed: {error_msg}")
+            # print full stack trace for debugging
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return progress.get_results_dataframe()
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--instruments", type=str, default=None)
+    parser = argparse.ArgumentParser(description="Train Mixture-of-Experts models")
+    parser.add_argument("--resume", action="store_true", default=True, help="Resume from last checkpoint")
+    parser.add_argument("--fresh", action="store_true", help="Start fresh")
+    parser.add_argument("--instruments", type=str, default=None, help="Comma-separated list")
+    parser.add_argument("--status", action="store_true", help="Show status")
+
     args = parser.parse_args()
+
+    if args.status:
+        progress = ProgressTracker(progress_file="outputs/progress/moe_training.json")
+        print(progress.summary())
+        return
+
+    resume = args.resume and not args.fresh
 
     print("MIXTURE-OF-EXPERTS TRAINING (WITH CHRONOS)")
     config = load_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    train_df, val_df, _ = load_data(config)
+    train_df, val_df, test_df = load_data(config)
     
     # Timezone fix
-    for df in (train_df, val_df):
+    for df in (train_df, val_df, test_df):
         if "datetime" in df.columns and hasattr(df["datetime"], "dt"):
              df["datetime"] = df["datetime"].dt.tz_convert("America/New_York")
     
-    # Load regimes
-    train_regimes, val_regimes, _ = load_regimes(config)
+    train_regimes, val_regimes, test_regimes = load_regimes(config)
     train_df = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
     val_df = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
 
@@ -296,13 +322,13 @@ def main():
     else:
         instruments = config["data"]["instruments"]
 
-    results_df = train_all_moe(train_df, val_df, instruments, config, device)
+    results_df = train_all_moe(train_df, val_df, instruments, config, device, resume=resume)
     
-    # Save Results
-    Path("outputs/results").mkdir(parents=True, exist_ok=True)
-    results_df.to_csv("outputs/results/moe_results.csv", index=False)
-    print("\nFinal Results:")
-    print(results_df[["instrument", "rmse", "mae", "r2"]])
+    if len(results_df) > 0:
+        results_path = Path("outputs/results")
+        results_path.mkdir(parents=True, exist_ok=True)
+        results_df.to_csv(results_path / "moe_results.csv", index=False)
+        print("\nFinal Results Saved.")
 
 if __name__ == "__main__":
     main()
