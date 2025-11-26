@@ -4,12 +4,14 @@ import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
 import sys
+import pandas as pd  # <--- Added
 
 sys.path.append("src")
 from models.gating import GatingNetwork, SupervisedGatingNetwork
 from models.har_rv import HARRV
 from models.lstm import LSTMModel
 from models.tcn import TCNModel
+# Ensure this import works (file exists)
 from models.chronos import ChronosExpert 
 
 
@@ -79,7 +81,8 @@ def load_expert_models(
     models_dir = Path("outputs/models")
 
     all_experts = {}
-
+    
+    # Shared instance for Chronos to save memory
     _shared_chronos_model = None
 
     for instrument in instruments:
@@ -121,13 +124,12 @@ def load_expert_models(
                     instrument_experts["tcn"] = model
             
             elif expert_name == "chronos":
-                #Check if Chronos model is in memory already
                 if _shared_chronos_model is None:
-                    model_name = config["models"].get("chronos", {}).get("model_name", "amazon/chronos-bolt-small")
+                    # Load from config, defaulting to T5-small
+                    model_name = config["models"].get("chronos", {}).get("model_name", "amazon/chronos-t5-small")
                     print(f"Initializing shared Chronos Expert: {model_name}...")
                     _shared_chronos_model = ChronosExpert(model_name=model_name, device=device)
                 
-                #Using shared instance
                 instrument_experts["chronos"] = _shared_chronos_model
 
         all_experts[instrument] = instrument_experts
@@ -139,17 +141,26 @@ class HARRVWrapper(nn.Module):
     def __init__(self, har_model: HARRV):
         super(HARRVWrapper, self).__init__()
         self.har_model = har_model
-        self.feature_cols = har_model.feature_cols
+        # FIX 1: Correctly map feature names
+        self.feature_names = har_model.feature_cols 
 
     def forward(self, x):
         if isinstance(x, torch.Tensor):
             x_np = x.cpu().numpy()
-            #Handle batch dimension if needed
             if len(x_np.shape) == 3:
-                x_np = x_np[:, -1, :] #Take last timestep
+                x_np = x_np[:, -1, :]
 
-            import pandas as pd
-            x_df = pd.DataFrame(x_np, columns=self.get_feature_names(x_np.shape[1]))
+            # FIX 2: Slicing logic for dimension mismatch
+            expected_count = len(self.feature_names)
+            if x_np.shape[1] > expected_count:
+                x_input = x_np[:, :expected_count]
+                cols = self.feature_names
+            else:
+                x_input = x_np
+                # Fallback if dimensions match
+                cols = self.feature_names if x_np.shape[1] == expected_count else [f"f{i}" for i in range(x_np.shape[1])]
+
+            x_df = pd.DataFrame(x_input, columns=cols)
 
             predictions = self.har_model.predict(x_df)
             return torch.FloatTensor(predictions).unsqueeze(1).to(x.device)

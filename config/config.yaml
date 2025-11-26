@@ -54,7 +54,7 @@ models:
     num_layers: 2
     dropout: 0.2
     sequence_length: 20
-    batch_size: 256
+    batch_size: 64
     learning_rate: 0.001
     epochs: 50
     patience: 10
@@ -64,16 +64,16 @@ models:
     kernel_size: 3
     dropout: 0.2
     sequence_length: 20
-    batch_size: 256
+    batch_size: 64
     learning_rate: 0.001
     epochs: 50
     patience: 10
 
   chronos:
-    model_name: "amazon/chronos-bolt-small"
+    model_name: "amazon/chronos-t5-small"
     device: "cuda"
     prediction_length: 1
-    num_samples: 20         # Lower this to 10 if you hit Out-of-Memory (OOM)
+    num_samples: 5          # Low samples to save RAM
     context_length: 64
 
 regimes:
@@ -110,7 +110,7 @@ moe:
   training:
     freeze_experts: true
     joint_finetune: false
-    batch_size: 256
+    batch_size: 64
     learning_rate: 0.001
     epochs: 30
     patience: 10
