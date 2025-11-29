@@ -25,6 +25,3 @@ tqdm==4.67.1
 typing_extensions==4.15.0
 tzdata==2025.2
 hmmlearn==0.3.3
-transformers>=4.30.0
-accelerate>=0.20.0
-git+https://github.com/amazon-science/chronos-forecasting.git
