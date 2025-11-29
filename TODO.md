@@ -103,7 +103,9 @@ What's needed:
 - Compare: Does foundation model help?
 Why it matters: Original proposal mentioned it, would be cool to include
 Implementation: src/models/foundation.py, update MoE
+
 ---
+
 ## Recommended Priority Order
 ### Phase 1: Complete Core Functionality (Week 7)
 1. Test Set Evaluation - Run all models on test data
