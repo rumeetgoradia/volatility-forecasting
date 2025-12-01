@@ -40,6 +40,10 @@ class VolatilityDataset(Dataset):
         self.dates_ns = pd.to_datetime(df_clean["datetime"]).astype("int64").values
         self.regimes = df_clean["regime"].values if "regime" in df_clean.columns else None
 
+        # Store raw target history for Chronos (before scaling)
+        # We assume the target_col (e.g. RV_1D) is the volatility itself
+        self.raw_series = df_clean[target_col].values
+
         if scaler is None:
             self.scaler = StandardScaler()
             if fit_scaler:
@@ -54,17 +58,25 @@ class VolatilityDataset(Dataset):
     def __len__(self) -> int:
         return len(self.valid_indices)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         actual_idx = self.valid_indices[idx]
 
         start_idx = actual_idx - self.sequence_length
         end_idx = actual_idx
 
+        # Scaled Features (for LSTM/TCN)
         X = self.features_scaled[start_idx:end_idx]
+        
+        # Target (Next Step)
         y = self.targets[actual_idx]
+
+        # Raw History (For Chronos)
+        # Grab the same window of the TARGET column, unscaled
+        X_raw = self.raw_series[start_idx:end_idx]
 
         X_tensor = torch.FloatTensor(X)
         y_tensor = torch.FloatTensor([y])
+        X_raw_tensor = torch.FloatTensor(X_raw)
 
         if not self.return_metadata:
             return X_tensor, y_tensor
@@ -74,6 +86,7 @@ class VolatilityDataset(Dataset):
             meta["regime"] = self.regimes[actual_idx]
 
         return X_tensor, y_tensor, meta
+        return X_tensor, y_tensor, X_raw_tensor
 
     def get_scaler(self) -> StandardScaler:
         return self.scaler

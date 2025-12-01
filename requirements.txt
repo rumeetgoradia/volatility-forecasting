@@ -29,3 +29,6 @@ tzdata==2025.2
 hmmlearn==0.3.3
 chronos-forecasting
 git+https://github.com/shiyu-coder/Kronos.git
+transformers>=4.30.0
+accelerate>=0.20.0
+git+https://github.com/amazon-science/chronos-forecasting.git

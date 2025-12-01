@@ -65,7 +65,7 @@ models:
     num_layers: 2
     dropout: 0.2
     sequence_length: 20
-    batch_size: 256
+    batch_size: 64 # Reduced for lower compute
     learning_rate: 0.001
     epochs: 50
     patience: 10
@@ -75,10 +75,18 @@ models:
     kernel_size: 3
     dropout: 0.2
     sequence_length: 20
-    batch_size: 256
+    batch_size: 64 # Reduced for lower compute
     learning_rate: 0.001
     epochs: 50
     patience: 10
+  
+  # NEW: Added Chronos Configuration
+  chronos:
+    model_name: "amazon/chronos-t5-small"
+    prediction_length: 1
+    num_samples: 5  # Set to 5 for speed, 20 for better accuracy
+    context_length: 20
+    device: "cuda"
 
 regimes:
   method: "hmm"
@@ -105,6 +113,7 @@ moe:
     - "tcn"
     - "chronos_fintext"
     - "timesfm_fintext"
+    - "chronos" # Added Chronos here
 
   gating:
     hidden_size: 32
@@ -115,7 +124,7 @@ moe:
   training:
     freeze_experts: true
     joint_finetune: false
-    batch_size: 256
+    batch_size: 64  # Reduced from 256 to 64 to accommodate Chronos VRAM usage
     learning_rate: 0.001
     epochs: 30
     patience: 10
