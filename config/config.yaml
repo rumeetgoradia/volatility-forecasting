@@ -27,6 +27,11 @@ preprocessing:
   min_records_per_day: 50
 
 features:
+  keep_monthly_rv: false     # drop monthly RV features for 1H horizon (keep daily/weekly)
+  intraday:
+    rv_windows_minutes: [30, 120, 240]   # additional RV windows in minutes
+    rq_windows_minutes: [60, 240]        # realized quarticity windows in minutes
+    vol_corr_windows_minutes: [60, 240]  # abs returns vs volume rolling corr windows
   rv:
     freq: "5T"
     aggregation_periods: ["1D", "1W", "1M"]
@@ -48,6 +53,12 @@ features:
 models:
   har_rv:
     horizons: [1, 5, 22]
+
+  rf:
+    n_estimators: 300
+    max_depth: null
+    min_samples_leaf: 1
+    n_jobs: -1
 
   lstm:
     hidden_size: 64
@@ -92,6 +103,8 @@ moe:
     - "har_rv"
     - "lstm"
     - "tcn"
+    - "chronos_fintext"
+    - "timesfm_fintext"
 
   gating:
     hidden_size: 32
@@ -106,5 +119,74 @@ moe:
     learning_rate: 0.001
     epochs: 30
     patience: 10
+
+target:
+  bar_minutes: 5
+  horizon_minutes: 60
+  target_col: "RV_1H"
+  har_windows: [1, 6, 24]   # hours of history for baseline-like features
+  hourly_minute: 55          # keep rows at this minute mark for hourly sampling
+
+chronos2:
+  model_id: "amazon/chronos-t5-tiny"
+  bar_minutes: 5              # base bar size (matches processed data)
+  context_bars: 120           # lighter context for speed
+  prediction_length: 12       # bars to forecast (12 bars ~= 1 hour)
+  num_samples: 4              # stochastic samples to average
+  reduce: "mean"              # aggregation of samples: mean|median
+  device_map: "auto"          # passed to Chronos2Pipeline.from_pretrained
+  torch_dtype: "auto"         # let HF choose a sensible dtype (use bfloat16 on GPU)
+  progress_file: "outputs/progress/chronos2_training.json"
+
+chronos_fintext:
+  model_id: "FinText/Chronos_Tiny_2018_Global"
+  bar_minutes: 5
+  context_bars: 336            # ~14 days of hourly history
+  context_overrides: {}        # optional per-instrument overrides, e.g., {"INDX.SPX": 168}
+  prediction_length: 1
+  input_series: "RV_H1"      # univariate series fed to Chronos (e.g., RV_H1 or log_returns_sq)
+  input_representation: "rv" # "rv" if the series is already RV-scale, "variance" if it's per-bar variance
+  pred_floor: 0.0001         # base floor; dynamic floor is applied per instrument in code
+  num_samples: 50
+  reduce: "median"
+  device_map: "auto"
+  torch_dtype: "auto"
+  progress_file: "outputs/progress/chronos_fintext_training.json"
+
+kronos_mini:
+  model_id: "NeoQuasar/Kronos-small"
+  tokenizer_id: "NeoQuasar/Kronos-Tokenizer-base"
+  bar_minutes: 5
+  context_bars: 512            # number of recent 5-minute bars to feed Kronos (capped by max_context)
+  context_overrides: {}        # optional per-instrument overrides
+  max_context: 512             # max tokens Kronos will keep internally (small max is 512)
+  prediction_length: 1         # forecast 1 hourly step ahead (dataset is hourly downsampled)
+  temperature: 1.0
+  top_p: 0.9
+  top_k: 0
+  sample_count: 1
+  pred_floor: 1.0e-8
+  dyn_floor_factor: 0.1
+  calibrate: true
+  device: "cuda:0"             # set to "cpu" if no GPU is available
+  progress_file: "outputs/progress/kronos_mini_training.json"
+
+timesfm_fintext:
+  model_id: "FinText/TimesFM_8M_2018_Global"
+  bar_minutes: 5
+  context_bars: 120
+  context_overrides: {}        # optional per-instrument overrides
+  prediction_length: 12
+  frequency_id: 0              # FinText TimesFM uses 5T frequency_id=0
+  input_series: "RV_H1"        # default historical series to feed the model
+  input_representation: "rv"   # "rv" or "variance" (if using log_returns_sq)
+  pred_floor: 0.0001
+  dyn_floor_factor: 0.1
+  log_scale: true
+  calibrate: true
+  truncate_negative: false
+  device_map: "auto"
+  torch_dtype: "auto"
+  progress_file: "outputs/progress/timesfm_fintext_training.json"
 
 random_seed: 42
