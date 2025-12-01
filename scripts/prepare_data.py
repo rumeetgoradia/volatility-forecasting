@@ -8,6 +8,8 @@ from data.loader import DataLoader
 from data.preprocessing import DataPreprocessor
 from data.features import FeatureEngineer
 from data.splitter import DataSplitter
+from data.horizons import add_intraday_horizon_columns, downsample_hourly_rows
+from data.validation import assert_hourly_downsampled
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -19,6 +21,7 @@ def main():
     print("DATA PREPARATION PIPELINE")
 
     config = load_config()
+    target_cfg = config.get("target", {})
 
     print("Loading data")
     loader = DataLoader(config["data"]["raw_path"])
@@ -41,6 +44,42 @@ def main():
 
     df = engineer.build_full_feature_set(df, config=config["features"])
     print(f"After feature engineering: {len(df):,} records")
+
+    if not config["features"].get("keep_monthly_rv", True):
+        drop_cols = [c for c in ["RV_1M", "RV_monthly"] if c in df.columns]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+            print(f"Dropped monthly RV cols: {drop_cols}")
+
+    intr = config["features"].get("intraday", {})
+    if intr:
+        print("Adding intraday short-horizon features")
+        df = engineer.add_intraday_simple_features(
+            df,
+            rv_windows_minutes=intr.get("rv_windows_minutes", []),
+            rq_windows_minutes=intr.get("rq_windows_minutes", []),
+            vol_corr_windows_minutes=intr.get("vol_corr_windows_minutes", []),
+            bar_minutes=target_cfg.get("bar_minutes", 5),
+        )
+
+    print("Adding 1H target/features")
+    df = add_intraday_horizon_columns(
+        df,
+        target_col=target_cfg.get("target_col", "RV_1H"),
+        horizon_minutes=target_cfg.get("horizon_minutes", 60),
+        bar_minutes=target_cfg.get("bar_minutes", 5),
+        return_col="log_returns",
+        har_windows=target_cfg.get("har_windows", [1, 6, 24]),
+    )
+
+    minute_mark = target_cfg.get("hourly_minute")
+    if minute_mark is None:
+        raise ValueError("target.hourly_minute must be set to enforce hourly downsampling.")
+
+    print(f"Downsampling to hourly rows at minute={minute_mark}")
+    df = downsample_hourly_rows(df, minute=minute_mark)
+    print(f"After downsampling: {len(df):,} records")
+    assert_hourly_downsampled([("full", df)], minute_mark)
 
     print("Splitting data")
     splitter = DataSplitter(

@@ -18,6 +18,7 @@ from training.trainer import Trainer
 from training.callbacks import EarlyStopping, ModelCheckpoint
 from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
+from data.validation import assert_hourly_downsampled
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -31,6 +32,16 @@ def load_data(config: dict):
     train_df = pd.read_parquet(data_path / "train.parquet")
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
+
+    # Replace infinities; datasets will drop remaining NaNs
+    for df in (train_df, val_df, test_df):
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    minute_mark = config["target"].get("hourly_minute")
+    assert_hourly_downsampled(
+        [("train", train_df), ("val", val_df), ("test", test_df)],
+        minute_mark,
+    )
 
     return train_df, val_df, test_df
 
@@ -62,6 +73,7 @@ def get_feature_columns(df: pd.DataFrame) -> list:
         "RV_1D",
         "RV_1W",
         "RV_1M",
+        "RV_1H",
         "returns",
         "log_returns",
         "time_diff",
@@ -95,9 +107,10 @@ def train_moe_for_instrument(
         val_df,
         val_df,
         feature_cols=feature_cols,
-        target_col="RV_1D",
+        target_col=config["target"].get("target_col", "RV_1H"),
         sequence_length=sequence_length,
         instrument=instrument,
+        return_metadata=True,
     )
 
     train_loader = DataLoader(
@@ -109,8 +122,16 @@ def train_moe_for_instrument(
     )
 
     input_size = train_dataset.get_feature_dim()
+    use_regime_feature = bool(moe_config["gating"].get("use_regime_feature", True))
+    gating_input_size = input_size + (1 if use_regime_feature else 0)
 
-    all_experts = load_expert_models(config, [instrument], input_size, device)
+    all_experts = load_expert_models(
+        config,
+        [instrument],
+        input_size,
+        device,
+        feature_cols=feature_cols,
+    )
     expert_models = all_experts.get(instrument, {})
 
     if len(expert_models) == 0:
@@ -122,7 +143,7 @@ def train_moe_for_instrument(
 
     if use_supervision:
         gating = SupervisedGatingNetwork(
-            input_size=input_size,
+            input_size=gating_input_size,
             n_experts=len(expert_models),
             n_regimes=config["regimes"]["n_regimes"],
             hidden_size=moe_config["gating"]["hidden_size"],
@@ -131,7 +152,7 @@ def train_moe_for_instrument(
         )
     else:
         gating = GatingNetwork(
-            input_size=input_size,
+            input_size=gating_input_size,
             n_experts=len(expert_models),
             hidden_size=moe_config["gating"]["hidden_size"],
             num_layers=moe_config["gating"]["num_layers"],
@@ -142,6 +163,7 @@ def train_moe_for_instrument(
         expert_models=expert_models,
         gating_network=gating,
         freeze_experts=moe_config["training"]["freeze_experts"],
+        use_regime_feature=use_regime_feature,
     )
 
     moe_model.to(device)
@@ -175,7 +197,11 @@ def train_moe_for_instrument(
 
     val_preds = trainer.predict(val_loader, show_progress=False)
     val_targets = []
-    for _, y in val_loader:
+    for batch in val_loader:
+        if len(batch) == 3:
+            _, y, _ = batch
+        else:
+            _, y = batch
         val_targets.extend(y.numpy().flatten())
     val_targets = np.array(val_targets)
 

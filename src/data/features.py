@@ -132,6 +132,60 @@ class FeatureEngineer:
 
         return df
 
+    def add_intraday_simple_features(
+        self,
+        df: pd.DataFrame,
+        rv_windows_minutes: List[int],
+        rq_windows_minutes: List[int],
+        vol_corr_windows_minutes: List[int],
+        bar_minutes: int = 5,
+    ) -> pd.DataFrame:
+        """
+        Add short-horizon intraday realized volatility/quarticity and volume-return correlation features.
+        """
+        df = df.copy()
+        if "log_returns" not in df.columns:
+            df["log_returns"] = np.log(df["last"] / df.groupby("Future")["last"].shift(1))
+
+        abs_ret = df["log_returns"].abs()
+        sq_ret = df["log_returns"] ** 2
+        vol = df["volume"]
+
+        for minutes in rv_windows_minutes:
+            window = max(1, int(round(minutes / bar_minutes)))
+            rv = (
+                sq_ret.rolling(window=window, min_periods=window)
+                .sum()
+                .shift(1)
+            )
+            df[f"RV_{minutes}m"] = np.sqrt(np.clip(rv, a_min=0, a_max=None))
+
+        for minutes in rq_windows_minutes:
+            window = max(1, int(round(minutes / bar_minutes)))
+            rq = (
+                (sq_ret ** 2)
+                .rolling(window=window, min_periods=window)
+                .sum()
+                .shift(1)
+            )
+            df[f"RQ_{minutes}m"] = rq
+
+        for minutes in vol_corr_windows_minutes:
+            window = max(2, int(round(minutes / bar_minutes)))
+            roll = (
+                df.groupby("Future")
+                .apply(
+                    lambda x: x["log_returns"]
+                    .abs()
+                    .rolling(window=window, min_periods=window)
+                    .corr(x["volume"])
+                )
+                .reset_index(level=0, drop=True)
+            )
+            df[f"CorrAbsRetVol_{minutes}m"] = roll.shift(1)
+
+        return df
+
     def create_har_features(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
 

@@ -9,6 +9,7 @@ import yaml
 sys.path.append("src")
 from regimes.clustering import detect_regimes_all_instruments
 from regimes.analysis import RegimeAnalyzer
+from data.validation import assert_hourly_downsampled
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -22,6 +23,12 @@ def load_data(config: dict):
     train_df = pd.read_parquet(data_path / "train.parquet")
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
+
+    minute_mark = config["target"].get("hourly_minute")
+    assert_hourly_downsampled(
+        [("train", train_df), ("val", val_df), ("test", test_df)],
+        minute_mark,
+    )
 
     return train_df, val_df, test_df
 

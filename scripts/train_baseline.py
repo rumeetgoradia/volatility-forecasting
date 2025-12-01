@@ -11,6 +11,7 @@ sys.path.append("src")
 from models.har_rv import HARRV
 from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
+from data.validation import assert_hourly_downsampled
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -25,6 +26,15 @@ def load_data(config: dict):
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
 
+    for df in (train_df, val_df, test_df):
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    minute_mark = config["target"].get("hourly_minute")
+    assert_hourly_downsampled(
+        [("train", train_df), ("val", val_df), ("test", test_df)],
+        minute_mark,
+    )
+
     return train_df, val_df, test_df
 
 
@@ -32,17 +42,21 @@ def train_har_rv_for_instrument(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     instrument: str,
-    target_col: str = "RV_1D",
+    target_col: str = "RV_1H",
+    feature_cols: list = None,
     output_dir: Path = Path("outputs/models"),
 ):
 
     train_inst = train_df[train_df["Future"] == instrument].copy()
     val_inst = val_df[val_df["Future"] == instrument].copy()
 
-    X_train = train_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
+    if feature_cols is None:
+        feature_cols = ["RV_H1", "RV_H6", "RV_H24"]
+
+    X_train = train_inst[feature_cols]
     y_train = train_inst[target_col]
 
-    X_val = val_inst[["RV_daily", "RV_weekly", "RV_monthly"]]
+    X_val = val_inst[feature_cols]
     y_val = val_inst[target_col]
 
     mask_train = X_train.notna().all(axis=1) & y_train.notna()
@@ -53,7 +67,7 @@ def train_har_rv_for_instrument(
     X_val_clean = X_val[mask_val]
     y_val_clean = y_val[mask_val]
 
-    model = HARRV(name=f"HAR-RV_{instrument}")
+    model = HARRV(name=f"HAR-RV_{instrument}", feature_cols=feature_cols)
     model.fit(X_train_clean, y_train_clean)
 
     y_train_pred = model.predict(X_train_clean)
@@ -69,7 +83,11 @@ def train_har_rv_for_instrument(
 
 
 def train_all_har_rv(
-    train_df: pd.DataFrame, val_df: pd.DataFrame, instruments: list, resume: bool = True
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    instruments: list,
+    resume: bool = True,
+    target_cfg: dict = None,
 ):
 
     progress = ProgressTracker(progress_file="outputs/progress/baseline_training.json")
@@ -92,6 +110,10 @@ def train_all_har_rv(
 
     print(f"Pending instruments: {', '.join(pending)}")
 
+    target_col = "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
+    har_windows = [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
+    feature_cols = [f"RV_H{w}" for w in har_windows]
+
     for instrument in pending:
         print(f"Training HAR-RV for {instrument}")
 
@@ -99,7 +121,12 @@ def train_all_har_rv(
             progress.mark_in_progress("har_rv", instrument)
 
             train_metrics, val_metrics = train_har_rv_for_instrument(
-                train_df, val_df, instrument, output_dir=output_dir
+                train_df,
+                val_df,
+                instrument,
+                target_col=target_col,
+                feature_cols=feature_cols,
+                output_dir=output_dir,
             )
 
             metrics = {
@@ -190,7 +217,9 @@ def main():
         instruments = config["data"]["instruments"]
         print(f"Training for {len(instruments)} instruments")
 
-    results_df = train_all_har_rv(train_df, val_df, instruments, resume=resume)
+    results_df = train_all_har_rv(
+        train_df, val_df, instruments, resume=resume, target_cfg=config.get("target", {})
+    )
 
     if len(results_df) == 0:
         print("No results to save")

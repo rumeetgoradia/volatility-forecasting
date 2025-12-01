@@ -18,6 +18,7 @@ from training.trainer import Trainer
 from training.callbacks import EarlyStopping, ModelCheckpoint
 from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
+from data.validation import assert_hourly_downsampled
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -32,6 +33,16 @@ def load_data(config: dict):
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
 
+    # Replace infinities and let dataset masking drop remaining NaNs
+    for df in (train_df, val_df, test_df):
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    minute_mark = config["target"].get("hourly_minute")
+    assert_hourly_downsampled(
+        [("train", train_df), ("val", val_df), ("test", test_df)],
+        minute_mark,
+    )
+
     return train_df, val_df, test_df
 
 
@@ -45,6 +56,7 @@ def get_feature_columns(df: pd.DataFrame) -> list:
         "RV_1D",
         "RV_1W",
         "RV_1M",
+        "RV_1H",
         "returns",
         "log_returns",
         "time_diff",
@@ -76,7 +88,7 @@ def train_model_for_instrument(
         val_df,
         val_df,
         feature_cols=feature_cols,
-        target_col="RV_1D",
+        target_col=config["target"].get("target_col", "RV_1H"),
         sequence_length=sequence_length,
         instrument=instrument,
     )

@@ -18,6 +18,7 @@ class VolatilityDataset(Dataset):
         instrument: Optional[str] = None,
         scaler: Optional[StandardScaler] = None,
         fit_scaler: bool = True,
+        return_metadata: bool = False,
     ):
 
         if instrument is not None:
@@ -28,13 +29,16 @@ class VolatilityDataset(Dataset):
         self.feature_cols = feature_cols
         self.target_col = target_col
         self.sequence_length = sequence_length
+        self.return_metadata = return_metadata
 
         mask = df[feature_cols + [target_col]].notna().all(axis=1)
         df_clean = df[mask].copy()
 
         self.features = df_clean[feature_cols].values
         self.targets = df_clean[target_col].values
-        self.dates = df_clean["datetime"].values
+        # Store datetime as int64 nanoseconds to keep collate simple
+        self.dates_ns = pd.to_datetime(df_clean["datetime"]).astype("int64").values
+        self.regimes = df_clean["regime"].values if "regime" in df_clean.columns else None
 
         if scaler is None:
             self.scaler = StandardScaler()
@@ -62,7 +66,14 @@ class VolatilityDataset(Dataset):
         X_tensor = torch.FloatTensor(X)
         y_tensor = torch.FloatTensor([y])
 
-        return X_tensor, y_tensor
+        if not self.return_metadata:
+            return X_tensor, y_tensor
+
+        meta = {"datetime": self.dates_ns[actual_idx]}
+        if self.regimes is not None:
+            meta["regime"] = self.regimes[actual_idx]
+
+        return X_tensor, y_tensor, meta
 
     def get_scaler(self) -> StandardScaler:
         return self.scaler
@@ -79,6 +90,7 @@ def create_datasets(
     target_col: str = "RV_1D",
     sequence_length: int = 20,
     instrument: Optional[str] = None,
+    return_metadata: bool = False,
 ) -> Tuple[VolatilityDataset, VolatilityDataset, VolatilityDataset]:
 
     train_dataset = VolatilityDataset(
@@ -89,6 +101,7 @@ def create_datasets(
         instrument,
         scaler=None,
         fit_scaler=True,
+        return_metadata=return_metadata,
     )
 
     scaler = train_dataset.get_scaler()
@@ -101,6 +114,7 @@ def create_datasets(
         instrument,
         scaler=scaler,
         fit_scaler=False,
+        return_metadata=return_metadata,
     )
 
     test_dataset = VolatilityDataset(
@@ -111,6 +125,7 @@ def create_datasets(
         instrument,
         scaler=scaler,
         fit_scaler=False,
+        return_metadata=return_metadata,
     )
 
     return train_dataset, val_dataset, test_dataset

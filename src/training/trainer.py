@@ -47,12 +47,24 @@ class Trainer:
             else train_loader
         )
 
-        for X_batch, y_batch in iterator:
+        for batch in iterator:
+            if len(batch) == 3:
+                X_batch, y_batch, meta_batch = batch
+            else:
+                X_batch, y_batch = batch
+                meta_batch = None
+
             X_batch = X_batch.to(self.device)
             y_batch = y_batch.to(self.device)
 
+            timestamps = None
+            regime = None
+            if meta_batch is not None and isinstance(meta_batch, dict):
+                timestamps = meta_batch.get("datetime")
+                regime = meta_batch.get("regime")
+
             self.optimizer.zero_grad()
-            outputs = self.model(X_batch)
+            outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
             loss = self.criterion(outputs, y_batch)
             loss.backward()
             self.optimizer.step()
@@ -84,11 +96,23 @@ class Trainer:
         )
 
         with torch.no_grad():
-            for X_batch, y_batch in iterator:
+            for batch in iterator:
+                if len(batch) == 3:
+                    X_batch, y_batch, meta_batch = batch
+                else:
+                    X_batch, y_batch = batch
+                    meta_batch = None
+
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
 
-                outputs = self.model(X_batch)
+                timestamps = None
+                regime = None
+                if meta_batch is not None and isinstance(meta_batch, dict):
+                    timestamps = meta_batch.get("datetime")
+                    regime = meta_batch.get("regime")
+
+                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
                 loss = self.criterion(outputs, y_batch)
 
                 total_loss += loss.item() * len(X_batch)
@@ -168,9 +192,31 @@ class Trainer:
         )
 
         with torch.no_grad():
-            for X_batch, _ in iterator:
+            for batch in iterator:
+                if len(batch) == 3:
+                    X_batch, _, meta_batch = batch
+                else:
+                    X_batch, _ = batch
+                    meta_batch = None
+
                 X_batch = X_batch.to(self.device)
-                outputs = self.model(X_batch)
+                timestamps = None
+                regime = None
+                if meta_batch is not None and isinstance(meta_batch, dict):
+                    timestamps = meta_batch.get("datetime")
+                    regime = meta_batch.get("regime")
+
+                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
                 all_preds.extend(outputs.cpu().numpy().flatten())
 
         return np.array(all_preds)
+
+    def _forward_model(self, X_batch, timestamps=None, regime=None):
+        """
+        Safely call the model while supporting optional metadata (timestamps/regime).
+        Falls back to vanilla call if the model does not accept extra kwargs.
+        """
+        try:
+            return self.model(X_batch, timestamps=timestamps, regime=regime)
+        except TypeError:
+            return self.model(X_batch)
