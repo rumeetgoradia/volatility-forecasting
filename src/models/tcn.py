@@ -1,5 +1,3 @@
-#  Temporal Convolutional Network for volatility forecasting
-
 import torch
 import torch.nn as nn
 from typing import List
@@ -53,14 +51,11 @@ class TemporalBlock(nn.Module):
     def forward(self, x):
         out = self.net(x)
 
-        # Remove padding to maintain causality
         if self.padding > 0:
-            out = out[:, :, :-self.padding]
+            out = out[:, :, : -self.padding]
 
-        # Adjust residual to match
         res = x if self.downsample is None else self.downsample(x)
 
-        # Ensure exact size match
         min_len = min(out.size(2), res.size(2))
         out = out[:, :, :min_len]
         res = res[:, :, :min_len]
@@ -107,4 +102,5 @@ class TCNModel(nn.Module):
         y = self.network(x)
         y = y[:, :, -1]
         output = self.fc(y)
-        return torch.clamp(output, min=0)  # Ensure positive
+        output = torch.clamp(output, min=0)
+        return output

@@ -1,5 +1,3 @@
-# Train Mixture-of-Experts model with resumable progress tracking
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -33,7 +31,6 @@ def load_data(config: dict):
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
 
-    # Replace infinities; datasets will drop remaining NaNs
     for df in (train_df, val_df, test_df):
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
@@ -51,7 +48,6 @@ def load_regimes(config: dict):
 
     def _load(name: str) -> pd.DataFrame:
         df = pd.read_csv(regimes_path / name)
-        # Parse with UTC, then convert to New York timezone for consistency
         dt_utc = pd.to_datetime(df["datetime"], utc=True)
         df["datetime"] = dt_utc.dt.tz_convert("America/New_York")
         return df
@@ -122,7 +118,7 @@ def train_moe_for_instrument(
     )
 
     input_size = train_dataset.get_feature_dim()
-    use_regime_feature = bool(moe_config["gating"].get("use_regime_feature", True))
+    use_regime_feature = moe_config["gating"].get("use_regime_feature", False)
     gating_input_size = input_size + (1 if use_regime_feature else 0)
 
     all_experts = load_expert_models(
@@ -140,6 +136,7 @@ def train_moe_for_instrument(
     print(f"Loaded {len(expert_models)} experts: {list(expert_models.keys())}")
 
     use_supervision = moe_config["gating"]["use_regime_supervision"]
+    temperature = moe_config["gating"].get("temperature", 2.0)
 
     if use_supervision:
         gating = SupervisedGatingNetwork(
@@ -149,6 +146,7 @@ def train_moe_for_instrument(
             hidden_size=moe_config["gating"]["hidden_size"],
             num_layers=moe_config["gating"]["num_layers"],
             dropout=moe_config["gating"]["dropout"],
+            temperature=temperature,
         )
     else:
         gating = GatingNetwork(
@@ -157,6 +155,7 @@ def train_moe_for_instrument(
             hidden_size=moe_config["gating"]["hidden_size"],
             num_layers=moe_config["gating"]["num_layers"],
             dropout=moe_config["gating"]["dropout"],
+            temperature=temperature,
         )
 
     moe_model = MixtureOfExperts(
@@ -171,7 +170,10 @@ def train_moe_for_instrument(
         moe_model.parameters(), lr=moe_config["training"]["learning_rate"]
     )
 
-    trainer = Trainer(moe_model, criterion, optimizer, device=device)
+    regime_loss_weight = moe_config["training"].get("regime_loss_weight", 0.1)
+    trainer = Trainer(
+        moe_model, criterion, optimizer, device=device, regime_loss_weight=regime_loss_weight
+    )
 
     model_dir = Path("outputs/models")
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -204,6 +206,10 @@ def train_moe_for_instrument(
     val_targets = np.array(val_targets)
 
     val_metrics = compute_all_metrics(val_targets, val_preds)
+
+    if len(trainer.history.get("val_regime_acc", [])) > 0:
+        val_metrics["regime_acc"] = trainer.history["val_regime_acc"][-1]
+
     return val_metrics, history
 
 
@@ -243,14 +249,15 @@ def train_all_moe(
 
             progress.mark_completed("moe", instrument, metrics)
 
-            print(
-                f"  Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}"
-            )
+            msg = f"  Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}"
+            if "regime_acc" in metrics:
+                msg += f", Regime Acc: {metrics['regime_acc']:.4f}"
+            print(msg)
 
         except KeyboardInterrupt:
-            print("\nTraining interrupted by user")
+            print("Training interrupted by user")
             print("Progress has been saved")
-            print(f"Resume with: python scripts/train_moe.py --resume")
+            print("Resume with: python scripts/train_moe.py --resume")
             sys.exit(0)
 
         except Exception as e:
@@ -303,17 +310,13 @@ def main():
     print("Loading processed data")
     train_df, val_df, test_df = load_data(config)
 
-    # Convert processed data datetimes to New York timezone to match regimes
     for df in (train_df, val_df, test_df):
         if "datetime" in df.columns and hasattr(df["datetime"], "dt"):
-            # train/val/test parquet store tz-aware datetimes (Europe/Amsterdam)
             df["datetime"] = df["datetime"].dt.tz_convert("America/New_York")
 
     print("Loading regime labels")
     train_regimes, val_regimes, test_regimes = load_regimes(config)
 
-    # Now datetimes are consistently tz-aware in America/New_York on both sides,
-    # so we can merge directly on datetime + Future.
     train_df = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
     val_df = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
 
@@ -335,7 +338,7 @@ def main():
         print("No results to save")
         return
 
-    print("\nTraining complete")
+    print("Training complete")
 
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
@@ -344,7 +347,7 @@ def main():
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
-    print("\nMoE Performance")
+    print("MoE Performance")
     print(f"  Average Val RMSE: {results_df['val_rmse'].mean():.6f}")
     print(f"  Average Val MAE: {results_df['val_mae'].mean():.6f}")
     print(f"  Average Val QLIKE: {results_df['val_qlike'].mean():.6f}")
@@ -357,15 +360,11 @@ def main():
         baseline_df = pd.read_csv(baseline_file)
         neural_df = pd.read_csv(neural_file)
 
-        print("\nComparison with all models")
+        print("Comparison with all models")
         print("Model       Avg Val RMSE")
         print(f"HAR-RV      {baseline_df['val_rmse'].mean():.6f}")
-        print(
-            f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}"
-        )
-        print(
-            f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}"
-        )
+        print(f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}")
+        print(f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}")
         print(f"MoE         {results_df['val_rmse'].mean():.6f}")
 
 

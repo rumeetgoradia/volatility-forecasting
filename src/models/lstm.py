@@ -1,5 +1,3 @@
-# LSTM model for volatility forecasting
-
 import torch
 import torch.nn as nn
 
@@ -31,4 +29,5 @@ class LSTMModel(nn.Module):
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]
         output = self.fc(last_output)
-        return torch.clamp(output, min=0)  # Ensure positive volatility
+        output = torch.clamp(output, min=0)
+        return output

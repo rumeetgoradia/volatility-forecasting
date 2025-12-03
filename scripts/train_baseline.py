@@ -1,5 +1,3 @@
-# Training script for HAR-RV baseline with resumable progress tracking
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -44,6 +42,8 @@ def train_har_rv_for_instrument(
     instrument: str,
     target_col: str = "RV_1H",
     feature_cols: list = None,
+    alpha: float = 0.01,
+    positive: bool = True,
     output_dir: Path = Path("outputs/models"),
 ):
 
@@ -61,26 +61,27 @@ def train_har_rv_for_instrument(
 
     mask_train = X_train.notna().all(axis=1) & y_train.notna()
     mask_val = X_val.notna().all(axis=1) & y_val.notna()
-    # Check for NaN issues upfront
+
     train_nan_pct = (~mask_train).mean() * 100
     val_nan_pct = (~mask_val).mean() * 100
+
     if train_nan_pct > 5 or val_nan_pct > 5:
-        print(
-            f"  WARNING: Dropping {train_nan_pct:.1f}% train, {val_nan_pct:.1f}% val samples due to NaN"
-        )
-        print(f"  Train: {len(X_train)} -> {mask_train.sum()}")
-        print(f"  Val: {len(X_val)} -> {mask_val.sum()}")
+        print(f"  Warning: Dropping {train_nan_pct:.1f}% train, {val_nan_pct:.1f}% val samples due to NaN")
+
     X_train_clean = X_train[mask_train]
     y_train_clean = y_train[mask_train]
     X_val_clean = X_val[mask_val]
     y_val_clean = y_val[mask_val]
-    # Ensure we have enough data
-    if len(X_train_clean) < 100:
-        raise ValueError(
-            f"Insufficient training data after NaN removal: {len(X_train_clean)}"
-        )
 
-    model = HARRV(name=f"HAR-RV_{instrument}", feature_cols=feature_cols)
+    if len(X_train_clean) < 100:
+        raise ValueError(f"Insufficient training data after NaN removal: {len(X_train_clean)}")
+
+    model = HARRV(
+        name=f"HAR-RV_{instrument}",
+        feature_cols=feature_cols,
+        alpha=alpha,
+        positive=positive,
+    )
     model.fit(X_train_clean, y_train_clean)
 
     y_train_pred = model.predict(X_train_clean)
@@ -101,6 +102,7 @@ def train_all_har_rv(
     instruments: list,
     resume: bool = True,
     target_cfg: dict = None,
+    har_cfg: dict = None,
 ):
 
     progress = ProgressTracker(progress_file="outputs/progress/baseline_training.json")
@@ -123,13 +125,12 @@ def train_all_har_rv(
 
     print(f"Pending instruments: {', '.join(pending)}")
 
-    target_col = (
-        "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
-    )
-    har_windows = (
-        [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
-    )
+    target_col = "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
+    har_windows = [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
     feature_cols = [f"RV_H{w}" for w in har_windows]
+
+    alpha = 0.01 if har_cfg is None else har_cfg.get("alpha", 0.01)
+    positive = True if har_cfg is None else har_cfg.get("positive", True)
 
     for instrument in pending:
         print(f"Training HAR-RV for {instrument}")
@@ -143,6 +144,8 @@ def train_all_har_rv(
                 instrument,
                 target_col=target_col,
                 feature_cols=feature_cols,
+                alpha=alpha,
+                positive=positive,
                 output_dir=output_dir,
             )
 
@@ -158,21 +161,14 @@ def train_all_har_rv(
 
             progress.mark_completed("har_rv", instrument, metrics)
 
-            print(
-                f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}"
-            )
-            print(
-                f"  Train MAE: {train_metrics['mae']:.6f}, Val MAE: {val_metrics['mae']:.6f}"
-            )
-            print(
-                f"  Train QLIKE: {train_metrics['qlike']:.6f}, Val QLIKE: {val_metrics['qlike']:.6f}"
-            )
-            print(f"  Saved model to {output_dir / f'har_rv_{instrument}.pkl'}")
+            print(f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}")
+            print(f"  Train MAE: {train_metrics['mae']:.6f}, Val MAE: {val_metrics['mae']:.6f}")
+            print(f"  Val R2: {val_metrics['r2']:.6f}")
 
         except KeyboardInterrupt:
-            print("\nTraining interrupted by user")
+            print("Training interrupted by user")
             print("Progress has been saved")
-            print(f"Resume with: python scripts/train_baseline.py --resume")
+            print("Resume with: python scripts/train_baseline.py --resume")
             sys.exit(0)
 
         except Exception as e:
@@ -240,13 +236,14 @@ def main():
         instruments,
         resume=resume,
         target_cfg=config.get("target", {}),
+        har_cfg=config["models"].get("har_rv", {}),
     )
 
     if len(results_df) == 0:
         print("No results to save")
         return
 
-    print("\nTraining complete")
+    print("Training complete")
 
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
@@ -255,15 +252,11 @@ def main():
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
-    print("\nSummary statistics")
-    print(
-        results_df[
-            ["instrument", "val_rmse", "val_mae", "val_qlike", "val_r2"]
-        ].to_string(index=False)
-    )
+    print("Summary statistics")
+    print(results_df[["instrument", "val_rmse", "val_mae", "val_qlike", "val_r2"]].to_string(index=False))
 
     avg_metrics = results_df[["val_rmse", "val_mae", "val_qlike", "val_r2"]].mean()
-    print("\nAverage validation metrics")
+    print("Average validation metrics")
     for metric, value in avg_metrics.items():
         print(f"  {metric}: {value:.6f}")
 

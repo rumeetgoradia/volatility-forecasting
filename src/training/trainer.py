@@ -1,10 +1,9 @@
-#  PyTorch training loop with metrics tracking and callback support
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
-from typing import Optional, Dict, Callable
+from typing import Optional, Dict
 from tqdm import tqdm
 import sys
 
@@ -19,11 +18,13 @@ class Trainer:
         criterion: nn.Module,
         optimizer: torch.optim.Optimizer,
         device: str = "cpu",
+        regime_loss_weight: float = 0.1,
     ):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
         self.device = device
+        self.regime_loss_weight = regime_loss_weight
         self.model.to(device)
 
         self.history = {
@@ -31,15 +32,40 @@ class Trainer:
             "val_loss": [],
             "train_rmse": [],
             "val_rmse": [],
+            "train_regime_loss": [],
+            "val_regime_loss": [],
+            "train_regime_acc": [],
+            "val_regime_acc": [],
         }
+
+        self.use_regime_supervision = self._check_regime_supervision()
+
+    def _check_regime_supervision(self) -> bool:
+        if hasattr(self.model, 'gating'):
+            gating = self.model.gating
+            return hasattr(gating, 'forward_with_regime')
+        return False
+
+    def _prepare_regime_tensor(self, regime):
+        if regime is None:
+            return None
+        
+        if torch.is_tensor(regime):
+            return regime.detach().clone().to(dtype=torch.long, device=self.device)
+        else:
+            return torch.tensor(regime, dtype=torch.long, device=self.device)
 
     def train_epoch(
         self, train_loader: DataLoader, show_progress: bool = False
     ) -> Dict[str, float]:
         self.model.train()
         total_loss = 0.0
+        total_pred_loss = 0.0
+        total_regime_loss = 0.0
         all_preds = []
         all_targets = []
+        all_regime_preds = []
+        all_regime_targets = []
 
         iterator = (
             tqdm(train_loader, desc="Training", leave=False)
@@ -64,12 +90,41 @@ class Trainer:
                 regime = meta_batch.get("regime")
 
             self.optimizer.zero_grad()
-            outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
-            loss = self.criterion(outputs, y_batch)
+
+            if self.use_regime_supervision and regime is not None:
+                regime_tensor = self._prepare_regime_tensor(regime)
+                valid_mask = regime_tensor >= 0
+
+                if valid_mask.sum() > 0:
+                    outputs, regime_logits = self._forward_with_regime(
+                        X_batch, timestamps=timestamps, regime=regime
+                    )
+
+                    pred_loss = self.criterion(outputs, y_batch)
+                    regime_loss = F.cross_entropy(
+                        regime_logits[valid_mask], regime_tensor[valid_mask]
+                    )
+                    loss = pred_loss + self.regime_loss_weight * regime_loss
+
+                    total_regime_loss += regime_loss.item() * valid_mask.sum().item()
+
+                    regime_preds = regime_logits.argmax(dim=1)
+                    all_regime_preds.extend(regime_preds[valid_mask].cpu().numpy())
+                    all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
+                else:
+                    outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    loss = self.criterion(outputs, y_batch)
+                    pred_loss = loss
+            else:
+                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                loss = self.criterion(outputs, y_batch)
+                pred_loss = loss
+
             loss.backward()
             self.optimizer.step()
 
             total_loss += loss.item() * len(X_batch)
+            total_pred_loss += pred_loss.item() * len(X_batch)
             all_preds.extend(outputs.detach().cpu().numpy().flatten())
             all_targets.extend(y_batch.cpu().numpy().flatten())
 
@@ -77,17 +132,35 @@ class Trainer:
                 iterator.set_postfix({"loss": loss.item()})
 
         avg_loss = total_loss / len(train_loader.dataset)
+        avg_pred_loss = total_pred_loss / len(train_loader.dataset)
         metrics = compute_all_metrics(np.array(all_targets), np.array(all_preds))
 
-        return {"loss": avg_loss, "rmse": metrics["rmse"], "mae": metrics["mae"]}
+        result = {
+            "loss": avg_loss,
+            "pred_loss": avg_pred_loss,
+            "rmse": metrics["rmse"],
+            "mae": metrics["mae"],
+        }
+
+        if len(all_regime_preds) > 0:
+            avg_regime_loss = total_regime_loss / len(all_regime_preds)
+            regime_acc = np.mean(np.array(all_regime_preds) == np.array(all_regime_targets))
+            result["regime_loss"] = avg_regime_loss
+            result["regime_acc"] = regime_acc
+
+        return result
 
     def validate(
         self, val_loader: DataLoader, show_progress: bool = False
     ) -> Dict[str, float]:
         self.model.eval()
         total_loss = 0.0
+        total_pred_loss = 0.0
+        total_regime_loss = 0.0
         all_preds = []
         all_targets = []
+        all_regime_preds = []
+        all_regime_targets = []
 
         iterator = (
             tqdm(val_loader, desc="Validating", leave=False)
@@ -112,10 +185,37 @@ class Trainer:
                     timestamps = meta_batch.get("datetime")
                     regime = meta_batch.get("regime")
 
-                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
-                loss = self.criterion(outputs, y_batch)
+                if self.use_regime_supervision and regime is not None:
+                    regime_tensor = self._prepare_regime_tensor(regime)
+                    valid_mask = regime_tensor >= 0
+
+                    if valid_mask.sum() > 0:
+                        outputs, regime_logits = self._forward_with_regime(
+                            X_batch, timestamps=timestamps, regime=regime
+                        )
+
+                        pred_loss = self.criterion(outputs, y_batch)
+                        regime_loss = F.cross_entropy(
+                            regime_logits[valid_mask], regime_tensor[valid_mask]
+                        )
+                        loss = pred_loss + self.regime_loss_weight * regime_loss
+
+                        total_regime_loss += regime_loss.item() * valid_mask.sum().item()
+
+                        regime_preds = regime_logits.argmax(dim=1)
+                        all_regime_preds.extend(regime_preds[valid_mask].cpu().numpy())
+                        all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
+                    else:
+                        outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                        loss = self.criterion(outputs, y_batch)
+                        pred_loss = loss
+                else:
+                    outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    loss = self.criterion(outputs, y_batch)
+                    pred_loss = loss
 
                 total_loss += loss.item() * len(X_batch)
+                total_pred_loss += pred_loss.item() * len(X_batch)
                 all_preds.extend(outputs.cpu().numpy().flatten())
                 all_targets.extend(y_batch.cpu().numpy().flatten())
 
@@ -123,9 +223,23 @@ class Trainer:
                     iterator.set_postfix({"loss": loss.item()})
 
         avg_loss = total_loss / len(val_loader.dataset)
+        avg_pred_loss = total_pred_loss / len(val_loader.dataset)
         metrics = compute_all_metrics(np.array(all_targets), np.array(all_preds))
 
-        return {"loss": avg_loss, "rmse": metrics["rmse"], "mae": metrics["mae"]}
+        result = {
+            "loss": avg_loss,
+            "pred_loss": avg_pred_loss,
+            "rmse": metrics["rmse"],
+            "mae": metrics["mae"],
+        }
+
+        if len(all_regime_preds) > 0:
+            avg_regime_loss = total_regime_loss / len(all_regime_preds)
+            regime_acc = np.mean(np.array(all_regime_preds) == np.array(all_regime_targets))
+            result["regime_loss"] = avg_regime_loss
+            result["regime_acc"] = regime_acc
+
+        return result
 
     def fit(
         self,
@@ -151,29 +265,40 @@ class Trainer:
             self.history["train_rmse"].append(train_metrics["rmse"])
             self.history["val_rmse"].append(val_metrics["rmse"])
 
+            if "regime_loss" in train_metrics:
+                self.history["train_regime_loss"].append(train_metrics["regime_loss"])
+                self.history["train_regime_acc"].append(train_metrics["regime_acc"])
+
+            if "regime_loss" in val_metrics:
+                self.history["val_regime_loss"].append(val_metrics["regime_loss"])
+                self.history["val_regime_acc"].append(val_metrics["regime_acc"])
+
             if verbose:
-                print(
+                msg = (
                     f"Epoch {epoch+1}/{epochs} - "
                     f"train_loss: {train_metrics['loss']:.6f}, "
                     f"val_loss: {val_metrics['loss']:.6f}, "
                     f"val_rmse: {val_metrics['rmse']:.6f}"
                 )
+                if "regime_acc" in val_metrics:
+                    msg += f", val_regime_acc: {val_metrics['regime_acc']:.4f}"
+                print(msg)
 
             if show_progress:
-                epoch_iterator.set_postfix(
-                    {
-                        "train_loss": train_metrics["loss"],
-                        "val_loss": val_metrics["loss"],
-                        "val_rmse": val_metrics["rmse"],
-                    }
-                )
+                postfix = {
+                    "train_loss": train_metrics["loss"],
+                    "val_loss": val_metrics["loss"],
+                    "val_rmse": val_metrics["rmse"],
+                }
+                if "regime_acc" in val_metrics:
+                    postfix["val_regime_acc"] = val_metrics["regime_acc"]
+                epoch_iterator.set_postfix(postfix)
 
             if checkpoint is not None:
                 checkpoint(self.model, {"val_loss": val_metrics["loss"]})
 
             if early_stopping is not None:
                 if early_stopping(val_metrics["loss"]):
-                    # Always show when early stopping happens, even if verbose is False
                     print(f"Early stopping at epoch {epoch+1}")
                     break
 
@@ -212,11 +337,14 @@ class Trainer:
         return np.array(all_preds)
 
     def _forward_model(self, X_batch, timestamps=None, regime=None):
-        """
-        Safely call the model while supporting optional metadata (timestamps/regime).
-        Falls back to vanilla call if the model does not accept extra kwargs.
-        """
         try:
             return self.model(X_batch, timestamps=timestamps, regime=regime)
         except TypeError:
             return self.model(X_batch)
+
+    def _forward_with_regime(self, X_batch, timestamps=None, regime=None):
+        if hasattr(self.model, 'forward_with_regime'):
+            return self.model.forward_with_regime(X_batch, timestamps=timestamps, regime=regime)
+        else:
+            outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+            return outputs, None
