@@ -60,9 +60,17 @@ def get_feature_columns(df: pd.DataFrame) -> list:
         "is_gap",
         "is_outlier",
     ]
-
     feature_cols = [col for col in df.columns if col not in exclude_cols]
     return feature_cols
+
+
+def compute_target_mean(
+    train_df: pd.DataFrame, instrument: str, target_col: str
+) -> float:
+    inst_df = train_df[train_df["Future"] == instrument]
+    target_values = inst_df[target_col].values
+    target_values = target_values[np.isfinite(target_values) & (target_values > 0)]
+    return float(np.mean(target_values)) if len(target_values) > 0 else 0.005
 
 
 def train_model_for_instrument(
@@ -74,21 +82,24 @@ def train_model_for_instrument(
     device: str = "cpu",
     show_progress: bool = True,
 ):
-
     feature_cols = get_feature_columns(train_df)
 
     model_config = config["models"][model_type]
     sequence_length = model_config["sequence_length"]
+    target_col = config["target"].get("target_col", "RV_1H")
+
+    target_mean = compute_target_mean(train_df, instrument, target_col)
+    print(f"  Target mean for {instrument}: {target_mean:.6f}")
 
     train_dataset, val_dataset, _ = create_datasets(
         train_df,
         val_df,
         val_df,
         feature_cols=feature_cols,
-        target_col=config["target"].get("target_col", "RV_1H"),
+        target_col=target_col,
         sequence_length=sequence_length,
         instrument=instrument,
-        scale_features=True
+        scale_features=True,
     )
 
     train_loader = DataLoader(
@@ -113,19 +124,26 @@ def train_model_for_instrument(
             hidden_size=model_config["hidden_size"],
             num_layers=model_config["num_layers"],
             dropout=model_config["dropout"],
+            target_mean=target_mean,
         )
     elif model_type == "tcn":
         model = TCNModel(
             input_size=input_size,
-            num_channels=model_config["num_channels"],
+            hidden_channels=64,
+            num_layers=3,
             kernel_size=model_config["kernel_size"],
             dropout=model_config["dropout"],
+            target_mean=target_mean,
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
     criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=model_config["learning_rate"])
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=model_config["learning_rate"],
+        weight_decay=1e-5,
+    )
 
     trainer = Trainer(model, criterion, optimizer, device=device)
 
@@ -143,12 +161,11 @@ def train_model_for_instrument(
         epochs=model_config["epochs"],
         early_stopping=early_stopping,
         checkpoint=checkpoint,
-        verbose=False,
+        verbose=True,
         show_progress=show_progress,
     )
 
     checkpoint.load_best_model(model)
-
     torch.save(model.state_dict(), checkpoint_path)
 
     val_preds = trainer.predict(val_loader, show_progress=False)
@@ -172,7 +189,6 @@ def train_all_models(
     resume: bool = True,
     model_types: list = ["lstm", "tcn"],
 ):
-
     progress = ProgressTracker()
 
     if not resume:
@@ -212,13 +228,12 @@ def train_all_models(
                 progress.mark_completed(model_type, instrument, metrics)
 
                 print(
-                    f"    Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}"
+                    f"    Val RMSE: {metrics['rmse']:.6f}, Val MAE: {metrics['mae']:.6f}, Val R2: {metrics['r2']:.6f}"
                 )
 
             except KeyboardInterrupt:
                 print("\nTraining interrupted by user")
                 print("Progress has been saved")
-                print(f"Resume with: python scripts/train_neural.py --resume")
                 sys.exit(0)
 
             except Exception as e:
@@ -232,33 +247,12 @@ def train_all_models(
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train neural models for volatility forecasting"
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        default=True,
-        help="Resume from last checkpoint (default: True)",
-    )
-    parser.add_argument(
-        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
-    )
-    parser.add_argument(
-        "--models",
-        type=str,
-        default="lstm,tcn",
-        help="Comma-separated list of models to train (default: lstm,tcn)",
-    )
-    parser.add_argument(
-        "--instruments",
-        type=str,
-        default=None,
-        help="Comma-separated list of instruments to train (default: all)",
-    )
-    parser.add_argument(
-        "--status", action="store_true", help="Show training progress and exit"
-    )
+    parser = argparse.ArgumentParser(description="Train neural models")
+    parser.add_argument("--resume", action="store_true", default=True)
+    parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--models", type=str, default="lstm,tcn")
+    parser.add_argument("--instruments", type=str, default=None)
+    parser.add_argument("--status", action="store_true")
 
     args = parser.parse_args()
 
@@ -270,7 +264,7 @@ def main():
     resume = args.resume and not args.fresh
     model_types = [m.strip() for m in args.models.split(",")]
 
-    print("NEURAL MODELS TRAINING (UNSCALED)")
+    print("NEURAL MODELS TRAINING")
 
     config = load_config()
 
@@ -319,24 +313,7 @@ def main():
         print(f"{model}:")
         print(f"  Average Val RMSE: {model_results['val_rmse'].mean():.6f}")
         print(f"  Average Val MAE: {model_results['val_mae'].mean():.6f}")
-        print(f"  Average Val QLIKE: {model_results['val_qlike'].mean():.6f}")
         print(f"  Average Val R2: {model_results['val_r2'].mean():.6f}")
-
-    baseline_file = results_path / "baseline_results.csv"
-    if baseline_file.exists():
-        baseline_df = pd.read_csv(baseline_file)
-
-        print("\nComparison with HAR-RV baseline")
-        print("Model       Avg Val RMSE")
-        print(f"HAR-RV      {baseline_df['val_rmse'].mean():.6f}")
-        if "LSTM" in results_df["model"].values:
-            print(
-                f"LSTM        {results_df[results_df['model']=='LSTM']['val_rmse'].mean():.6f}"
-            )
-        if "TCN" in results_df["model"].values:
-            print(
-                f"TCN         {results_df[results_df['model']=='TCN']['val_rmse'].mean():.6f}"
-            )
 
 
 if __name__ == "__main__":

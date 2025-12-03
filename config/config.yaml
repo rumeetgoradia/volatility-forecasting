@@ -68,7 +68,7 @@ models:
     dropout: 0.2
     sequence_length: 20
     batch_size: 64
-    learning_rate: 0.0001
+    learning_rate: 0.001
     epochs: 50
     patience: 10
 
@@ -78,7 +78,7 @@ models:
     dropout: 0.2
     sequence_length: 20
     batch_size: 64
-    learning_rate: 0.0001
+    learning_rate: 0.001
     epochs: 50
     patience: 10
 
@@ -117,24 +117,23 @@ moe:
     - "tcn"
     - "chronos_fintext"
     - "timesfm_fintext"
-    - "chronos"
 
   gating:
     hidden_size: 32
     num_layers: 2
     dropout: 0.1
     use_regime_supervision: true
-    use_regime_feature: false
-    temperature: 2.0
+    use_regime_feature: true
+    temperature: 1.0
 
   training:
     freeze_experts: true
     joint_finetune: false
     batch_size: 64
     learning_rate: 0.0001
-    epochs: 30
+    epochs: 50
     patience: 10
-    regime_loss_weight: 0.1
+    regime_loss_weight: 0.2
 
 target:
   bar_minutes: 5

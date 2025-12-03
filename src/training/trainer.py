@@ -49,11 +49,27 @@ class Trainer:
     def _prepare_regime_tensor(self, regime):
         if regime is None:
             return None
-        
+
         if torch.is_tensor(regime):
             return regime.detach().clone().to(dtype=torch.long, device=self.device)
         else:
             return torch.tensor(regime, dtype=torch.long, device=self.device)
+
+    def _extract_timestamps(self, meta_batch):
+        """Extract timestamps from metadata in consistent format."""
+        if meta_batch is None:
+            return None
+
+        if not isinstance(meta_batch, dict):
+            return None
+
+        if 'datetime_obj' in meta_batch:
+            return meta_batch
+
+        if 'datetime' in meta_batch:
+            return {'datetime_obj': meta_batch['datetime']}
+
+        return None
 
     def _check_for_nans(self, outputs, batch_idx, phase="train"):
         if torch.isnan(outputs).any() or torch.isinf(outputs).any():
@@ -96,11 +112,8 @@ class Trainer:
                 print(f"Warning: NaN in input data at batch {batch_idx}")
                 continue
 
-            timestamps = None
-            regime = None
-            if meta_batch is not None and isinstance(meta_batch, dict):
-                timestamps = meta_batch.get("datetime")
-                regime = meta_batch.get("regime")
+            timestamps = self._extract_timestamps(meta_batch)
+            regime = meta_batch.get("regime") if meta_batch else None
 
             self.optimizer.zero_grad()
 
@@ -145,9 +158,9 @@ class Trainer:
                 continue
 
             loss.backward()
-            
+
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
+
             self.optimizer.step()
 
             total_loss += loss.item() * len(X_batch)
@@ -209,11 +222,8 @@ class Trainer:
                 if torch.isnan(X_batch).any() or torch.isnan(y_batch).any():
                     continue
 
-                timestamps = None
-                regime = None
-                if meta_batch is not None and isinstance(meta_batch, dict):
-                    timestamps = meta_batch.get("datetime")
-                    regime = meta_batch.get("regime")
+                timestamps = self._extract_timestamps(meta_batch)
+                regime = meta_batch.get("regime") if meta_batch else None
 
                 if self.use_regime_supervision and regime is not None:
                     regime_tensor = self._prepare_regime_tensor(regime)
@@ -365,11 +375,9 @@ class Trainer:
                     meta_batch = None
 
                 X_batch = X_batch.to(self.device)
-                timestamps = None
-                regime = None
-                if meta_batch is not None and isinstance(meta_batch, dict):
-                    timestamps = meta_batch.get("datetime")
-                    regime = meta_batch.get("regime")
+
+                timestamps = self._extract_timestamps(meta_batch)
+                regime = meta_batch.get("regime") if meta_batch else None
 
                 outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
                 all_preds.extend(outputs.cpu().numpy().flatten())
@@ -380,7 +388,10 @@ class Trainer:
         try:
             return self.model(X_batch, timestamps=timestamps, regime=regime)
         except TypeError:
-            return self.model(X_batch)
+            try:
+                return self.model(X_batch, timestamps=timestamps)
+            except TypeError:
+                return self.model(X_batch)
 
     def _forward_with_regime(self, X_batch, timestamps=None, regime=None):
         if hasattr(self.model, 'forward_with_regime'):

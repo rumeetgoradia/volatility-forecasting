@@ -25,12 +25,21 @@ def custom_collate_fn(batch):
         for key in meta_list[0].keys():
             values = [m[key] for m in meta_list]
 
-            if key == 'datetime_obj':
+            if key == "datetime_obj":
                 meta_batch[key] = values
-            elif key == 'datetime':
-                meta_batch[key] = torch.tensor(values, dtype=torch.int64)
-            elif key == 'regime':
-                meta_batch[key] = torch.tensor(values, dtype=torch.long)
+            elif key == "datetime":
+                # Don't convert to tensor - keep as list to avoid overflow
+                meta_batch[key] = values
+            elif key == "regime":
+                regime_values = []
+                for v in values:
+                    if isinstance(v, (int, np.integer)):
+                        regime_values.append(int(v))
+                    elif isinstance(v, (float, np.floating)):
+                        regime_values.append(int(v) if np.isfinite(v) else -1)
+                    else:
+                        regime_values.append(-1)
+                meta_batch[key] = torch.tensor(regime_values, dtype=torch.long)
             else:
                 meta_batch[key] = values
 
@@ -71,11 +80,11 @@ class VolatilityDataset(Dataset):
         self.features = df_clean[feature_cols].values
         self.targets = df_clean[target_col].values
 
-        dt_series = pd.to_datetime(df_clean["datetime"])
-        self.dates_ns = dt_series.astype("int64").values
-        self.dates_dt = dt_series.values
+        self.dates_dt = df_clean["datetime"].values
 
-        self.regimes = df_clean["regime"].values if "regime" in df_clean.columns else None
+        self.regimes = (
+            df_clean["regime"].values if "regime" in df_clean.columns else None
+        )
 
         self.raw_series = df_clean[target_col].values
 
@@ -117,7 +126,6 @@ class VolatilityDataset(Dataset):
             return X_tensor, y_tensor
 
         meta = {
-            "datetime": self.dates_ns[actual_idx],
             "datetime_obj": self.dates_dt[actual_idx],
         }
         if self.regimes is not None:

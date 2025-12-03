@@ -17,11 +17,32 @@ from training.callbacks import EarlyStopping, ModelCheckpoint
 from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
 from data.validation import assert_hourly_downsampled
+import traceback
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+
+def clean_datetime_for_dataset(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "datetime" not in df.columns:
+        return df
+
+    df["datetime"] = pd.to_datetime(df["datetime"], errors='coerce')
+
+    df = df[df["datetime"].notna()].copy()
+
+    if df["datetime"].dt.tz is not None:
+        df["datetime"] = df["datetime"].dt.tz_localize(None)
+
+    min_date = pd.Timestamp('1990-01-01')
+    max_date = pd.Timestamp('2030-01-01')
+    df = df[(df["datetime"] >= min_date) & (df["datetime"] <= max_date)].copy()
+
+    return df
 
 
 def load_data(config: dict):
@@ -48,8 +69,7 @@ def load_regimes(config: dict):
 
     def _load(name: str) -> pd.DataFrame:
         df = pd.read_csv(regimes_path / name)
-        dt_utc = pd.to_datetime(df["datetime"], utc=True)
-        df["datetime"] = dt_utc.dt.tz_convert("America/New_York")
+        df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_localize(None)
         return df
 
     train_regimes = _load("regime_labels_train.csv")
@@ -61,23 +81,10 @@ def load_regimes(config: dict):
 
 def get_feature_columns(df: pd.DataFrame) -> list:
     exclude_cols = [
-        "timestamp",
-        "Future",
-        "datetime",
-        "date",
-        "week",
-        "RV_1D",
-        "RV_1W",
-        "RV_1M",
-        "RV_1H",
-        "returns",
-        "log_returns",
-        "time_diff",
-        "is_gap",
-        "is_outlier",
-        "regime",
+        "timestamp", "Future", "datetime", "date", "week",
+        "RV_1D", "RV_1W", "RV_1M", "RV_1H",
+        "returns", "log_returns", "time_diff", "is_gap", "is_outlier", "regime",
     ]
-
     feature_cols = [col for col in df.columns if col not in exclude_cols]
     return feature_cols
 
@@ -89,8 +96,10 @@ def train_moe_for_instrument(
     config: dict,
     device: str = "cpu",
 ):
-
     print(f"Training MoE for {instrument}")
+
+    train_df = clean_datetime_for_dataset(train_df)
+    val_df = clean_datetime_for_dataset(val_df)
 
     feature_cols = get_feature_columns(train_df)
 
@@ -107,7 +116,7 @@ def train_moe_for_instrument(
         sequence_length=sequence_length,
         instrument=instrument,
         return_metadata=True,
-        scale_features=False,
+        scale_features=True,
     )
 
     train_loader = DataLoader(
@@ -270,10 +279,10 @@ def train_all_moe(
         except KeyboardInterrupt:
             print("Training interrupted by user")
             print("Progress has been saved")
-            print("Resume with: python scripts/train_moe.py --resume")
             sys.exit(0)
 
         except Exception as e:
+            traceback.print_exc()
             error_msg = str(e)
             progress.mark_failed("moe", instrument, error_msg)
             print(f"  Failed: {error_msg}")
@@ -285,24 +294,10 @@ def train_all_moe(
 
 def main():
     parser = argparse.ArgumentParser(description="Train Mixture-of-Experts models")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        default=True,
-        help="Resume from last checkpoint (default: True)",
-    )
-    parser.add_argument(
-        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
-    )
-    parser.add_argument(
-        "--instruments",
-        type=str,
-        default=None,
-        help="Comma-separated list of instruments to train (default: all)",
-    )
-    parser.add_argument(
-        "--status", action="store_true", help="Show training progress and exit"
-    )
+    parser.add_argument("--resume", action="store_true", default=True)
+    parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--instruments", type=str, default=None)
+    parser.add_argument("--status", action="store_true")
 
     args = parser.parse_args()
 
@@ -324,14 +319,17 @@ def main():
     train_df, val_df, test_df = load_data(config)
 
     for df in (train_df, val_df, test_df):
-        if "datetime" in df.columns and hasattr(df["datetime"], "dt"):
-            df["datetime"] = df["datetime"].dt.tz_convert("America/New_York")
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], errors='coerce').dt.tz_localize(None)
 
     print("Loading regime labels")
     train_regimes, val_regimes, test_regimes = load_regimes(config)
 
     train_df = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
     val_df = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
+
+    train_df = clean_datetime_for_dataset(train_df)
+    val_df = clean_datetime_for_dataset(val_df)
 
     print(f"Train: {len(train_df)} records")
     print(f"Val: {len(val_df)} records")
@@ -376,14 +374,25 @@ def main():
         print("Comparison with all models")
         print("Model       Avg Val RMSE")
         print(f"HAR-RV      {baseline_df['val_rmse'].mean():.6f}")
-        print(
-            f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}"
-        )
-        print(
-            f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}"
-        )
+        print(f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}")
+        print(f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}")
         print(f"MoE         {results_df['val_rmse'].mean():.6f}")
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
