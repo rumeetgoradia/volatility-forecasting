@@ -53,15 +53,17 @@ class TemporalBlock(nn.Module):
     def forward(self, x):
         out = self.net(x)
 
+        # Remove padding to maintain causality
         if self.padding > 0:
-            out = out[:, :, : -self.padding]
+            out = out[:, :, :-self.padding]
 
+        # Adjust residual to match
         res = x if self.downsample is None else self.downsample(x)
 
-        if out.size(2) < res.size(2):
-            res = res[:, :, : out.size(2)]
-        elif out.size(2) > res.size(2):
-            out = out[:, :, : res.size(2)]
+        # Ensure exact size match
+        min_len = min(out.size(2), res.size(2))
+        out = out[:, :, :min_len]
+        res = res[:, :, :min_len]
 
         return self.relu(out + res)
 
@@ -105,4 +107,4 @@ class TCNModel(nn.Module):
         y = self.network(x)
         y = y[:, :, -1]
         output = self.fc(y)
-        return output
+        return torch.clamp(output, min=0)  # Ensure positive

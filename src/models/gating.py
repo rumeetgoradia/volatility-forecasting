@@ -13,6 +13,7 @@ class GatingNetwork(nn.Module):
         hidden_size: int = 32,
         num_layers: int = 2,
         dropout: float = 0.1,
+        temperature: float = 1.0,
     ):
         super(GatingNetwork, self).__init__()
 
@@ -35,10 +36,14 @@ class GatingNetwork(nn.Module):
 
         self.network = nn.Sequential(*layers)
 
+        self.temperature = nn.Parameter(torch.tensor(temperature))  # Learnable
+
     def forward(self, x):
         logits = self.network(x)
-        weights = F.softmax(logits, dim=-1)
+        # Scale by temperature before softmax
+        weights = F.softmax(logits / self.temperature.clamp(min=0.1), dim=-1)
         return weights
+
 
     def forward_with_logits(self, x):
         logits = self.network(x)

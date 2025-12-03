@@ -61,11 +61,24 @@ def train_har_rv_for_instrument(
 
     mask_train = X_train.notna().all(axis=1) & y_train.notna()
     mask_val = X_val.notna().all(axis=1) & y_val.notna()
-
+    # Check for NaN issues upfront
+    train_nan_pct = (~mask_train).mean() * 100
+    val_nan_pct = (~mask_val).mean() * 100
+    if train_nan_pct > 5 or val_nan_pct > 5:
+        print(
+            f"  WARNING: Dropping {train_nan_pct:.1f}% train, {val_nan_pct:.1f}% val samples due to NaN"
+        )
+        print(f"  Train: {len(X_train)} -> {mask_train.sum()}")
+        print(f"  Val: {len(X_val)} -> {mask_val.sum()}")
     X_train_clean = X_train[mask_train]
     y_train_clean = y_train[mask_train]
     X_val_clean = X_val[mask_val]
     y_val_clean = y_val[mask_val]
+    # Ensure we have enough data
+    if len(X_train_clean) < 100:
+        raise ValueError(
+            f"Insufficient training data after NaN removal: {len(X_train_clean)}"
+        )
 
     model = HARRV(name=f"HAR-RV_{instrument}", feature_cols=feature_cols)
     model.fit(X_train_clean, y_train_clean)
@@ -110,8 +123,12 @@ def train_all_har_rv(
 
     print(f"Pending instruments: {', '.join(pending)}")
 
-    target_col = "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
-    har_windows = [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
+    target_col = (
+        "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
+    )
+    har_windows = (
+        [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
+    )
     feature_cols = [f"RV_H{w}" for w in har_windows]
 
     for instrument in pending:
@@ -218,7 +235,11 @@ def main():
         print(f"Training for {len(instruments)} instruments")
 
     results_df = train_all_har_rv(
-        train_df, val_df, instruments, resume=resume, target_cfg=config.get("target", {})
+        train_df,
+        val_df,
+        instruments,
+        resume=resume,
+        target_cfg=config.get("target", {}),
     )
 
     if len(results_df) == 0:

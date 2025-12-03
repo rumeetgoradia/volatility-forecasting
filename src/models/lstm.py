@@ -25,12 +25,10 @@ class LSTMModel(nn.Module):
             batch_first=True,
         )
 
-        self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 32), nn.ReLU(), nn.Dropout(dropout), nn.Linear(32, 1)
-        )
+        self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]
         output = self.fc(last_output)
-        return output
+        return torch.clamp(output, min=0)  # Ensure positive volatility
