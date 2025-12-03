@@ -9,7 +9,7 @@ import yaml
 import argparse
 
 sys.path.append("src")
-from data.dataset import create_datasets
+from data.dataset import create_datasets, custom_collate_fn
 from models.moe import MixtureOfExperts, load_expert_models
 from models.gating import GatingNetwork, SupervisedGatingNetwork
 from training.trainer import Trainer
@@ -107,14 +107,21 @@ def train_moe_for_instrument(
         sequence_length=sequence_length,
         instrument=instrument,
         return_metadata=True,
+        scale_features=False,
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=moe_config["training"]["batch_size"], shuffle=True
+        train_dataset,
+        batch_size=moe_config["training"]["batch_size"],
+        shuffle=True,
+        collate_fn=custom_collate_fn,
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=moe_config["training"]["batch_size"], shuffle=False
+        val_dataset,
+        batch_size=moe_config["training"]["batch_size"],
+        shuffle=False,
+        collate_fn=custom_collate_fn,
     )
 
     input_size = train_dataset.get_feature_dim()
@@ -172,7 +179,11 @@ def train_moe_for_instrument(
 
     regime_loss_weight = moe_config["training"].get("regime_loss_weight", 0.1)
     trainer = Trainer(
-        moe_model, criterion, optimizer, device=device, regime_loss_weight=regime_loss_weight
+        moe_model,
+        criterion,
+        optimizer,
+        device=device,
+        regime_loss_weight=regime_loss_weight,
     )
 
     model_dir = Path("outputs/models")
@@ -194,6 +205,8 @@ def train_moe_for_instrument(
     )
 
     checkpoint.load_best_model(moe_model)
+
+    torch.save(moe_model.state_dict(), checkpoint_path)
 
     val_preds = trainer.predict(val_loader, show_progress=False)
     val_targets = []
@@ -363,8 +376,12 @@ def main():
         print("Comparison with all models")
         print("Model       Avg Val RMSE")
         print(f"HAR-RV      {baseline_df['val_rmse'].mean():.6f}")
-        print(f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}")
-        print(f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}")
+        print(
+            f"LSTM        {neural_df[neural_df['model']=='LSTM']['val_rmse'].mean():.6f}"
+        )
+        print(
+            f"TCN         {neural_df[neural_df['model']=='TCN']['val_rmse'].mean():.6f}"
+        )
         print(f"MoE         {results_df['val_rmse'].mean():.6f}")
 
 

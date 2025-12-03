@@ -93,8 +93,11 @@ regimes:
   method: "hmm"
   n_regimes: 3
   features:
-    - "RV_1D"
+    - "RV_H1"
+    - "RV_H6"
     - "volume_log"
+    - "RV_30m"
+    - "RV_120m"
 
   hmm:
     n_components: 3

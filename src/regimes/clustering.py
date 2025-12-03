@@ -1,11 +1,11 @@
-# Regime detection using HMM and k-means clustering on volatility features
-
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from hmmlearn import hmm
 from typing import Tuple, Optional, List
+import pickle
+from pathlib import Path
 
 
 class RegimeDetector:
@@ -15,6 +15,7 @@ class RegimeDetector:
         self.model = None
         self.scaler = StandardScaler()
         self.regime_names = {0: "Low", 1: "Medium", 2: "High"}
+        self.is_fitted = False
 
     def fit(self, features: np.ndarray, **kwargs) -> "RegimeDetector":
         features_scaled = self.scaler.fit_transform(features)
@@ -26,6 +27,7 @@ class RegimeDetector:
         else:
             raise ValueError(f"Unknown method: {self.method}")
 
+        self.is_fitted = True
         return self
 
     def _fit_hmm(self, features: np.ndarray, **kwargs) -> hmm.GaussianHMM:
@@ -50,12 +52,11 @@ class RegimeDetector:
         random_state = kwargs.get("random_state", 42)
 
         model = KMeans(n_clusters=n_clusters, n_init=n_init, random_state=random_state)
-
         model.fit(features)
         return model
 
     def predict(self, features: np.ndarray) -> np.ndarray:
-        if self.model is None:
+        if not self.is_fitted:
             raise ValueError("Model not fitted. Call fit() first.")
 
         features_scaled = self.scaler.transform(features)
@@ -66,7 +67,6 @@ class RegimeDetector:
             regimes = self.model.predict(features_scaled)
 
         regimes = self._reorder_regimes(features, regimes)
-
         return regimes
 
     def _reorder_regimes(self, features: np.ndarray, regimes: np.ndarray) -> np.ndarray:
@@ -88,51 +88,74 @@ class RegimeDetector:
         self.fit(features, **kwargs)
         return self.predict(features)
 
+    def save(self, path: str):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'wb') as f:
+            pickle.dump(self, f)
 
-def detect_regimes_for_instrument(
-    df: pd.DataFrame,
-    instrument: str,
-    feature_cols: List[str],
-    method: str = "hmm",
-    n_regimes: int = 3,
-    **kwargs,
-) -> pd.DataFrame:
-
-    inst_df = df[df["Future"] == instrument].copy()
-    inst_df = inst_df.sort_values("datetime").reset_index(drop=True)
-
-    features = inst_df[feature_cols].values
-    mask = ~np.isnan(features).any(axis=1)
-
-    detector = RegimeDetector(method=method, n_regimes=n_regimes)
-
-    regimes_clean = detector.fit_predict(features[mask], **kwargs)
-
-    regimes = np.full(len(inst_df), -1)
-    regimes[mask] = regimes_clean
-
-    inst_df["regime"] = regimes
-
-    return inst_df[["datetime", "Future", "regime"]]
+    @staticmethod
+    def load(path: str) -> "RegimeDetector":
+        with open(path, 'rb') as f:
+            return pickle.load(f)
 
 
-def detect_regimes_all_instruments(
+def detect_regimes_per_instrument(
     df: pd.DataFrame,
     instruments: List[str],
     feature_cols: List[str],
     method: str = "hmm",
     n_regimes: int = 3,
     **kwargs,
+) -> Tuple[pd.DataFrame, dict]:
+
+    all_regimes = []
+    detectors = {}
+
+    for instrument in instruments:
+        print(f"Fitting regime detector for {instrument}")
+        inst_df = df[df["Future"] == instrument].copy()
+        inst_df = inst_df.sort_values("datetime").reset_index(drop=True)
+
+        features = inst_df[feature_cols].values
+        mask = ~np.isnan(features).any(axis=1)
+
+        detector = RegimeDetector(method=method, n_regimes=n_regimes)
+        regimes_clean = detector.fit_predict(features[mask], **kwargs)
+
+        regimes = np.full(len(inst_df), -1)
+        regimes[mask] = regimes_clean
+
+        inst_df["regime"] = regimes
+        all_regimes.append(inst_df[["datetime", "Future", "regime"]])
+
+        detectors[instrument] = detector
+
+    combined = pd.concat(all_regimes, ignore_index=True)
+    return combined, detectors
+
+
+def apply_regime_detectors(
+    df: pd.DataFrame,
+    detectors: dict,
+    feature_cols: List[str],
 ) -> pd.DataFrame:
 
     all_regimes = []
 
-    for instrument in instruments:
-        print(f"Detecting regimes for {instrument}")
-        regime_df = detect_regimes_for_instrument(
-            df, instrument, feature_cols, method, n_regimes, **kwargs
-        )
-        all_regimes.append(regime_df)
+    for instrument, detector in detectors.items():
+        inst_df = df[df["Future"] == instrument].copy()
+        inst_df = inst_df.sort_values("datetime").reset_index(drop=True)
+
+        features = inst_df[feature_cols].values
+        mask = ~np.isnan(features).any(axis=1)
+
+        regimes_clean = detector.predict(features[mask])
+
+        regimes = np.full(len(inst_df), -1)
+        regimes[mask] = regimes_clean
+
+        inst_df["regime"] = regimes
+        all_regimes.append(inst_df[["datetime", "Future", "regime"]])
 
     combined = pd.concat(all_regimes, ignore_index=True)
     return combined

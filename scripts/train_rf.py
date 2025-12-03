@@ -1,5 +1,3 @@
-# Train per-instrument RandomForestRegressor as a lightweight MoE expert
-
 import argparse
 import sys
 from pathlib import Path
@@ -72,14 +70,16 @@ def build_xy(dataset: VolatilityDataset):
     X_list = []
     y_list = []
     for idx in dataset.valid_indices:
-        X_list.append(dataset.features_scaled[idx - 1])  # use last timestep
+        X_list.append(dataset.features_scaled[idx - 1])
         y_list.append(dataset.targets[idx])
     X = np.asarray(X_list, dtype=np.float32)
     y = np.asarray(y_list, dtype=np.float32)
     return X, y
 
 
-def train_rf_for_instrument(instrument: str, train_df: pd.DataFrame, val_df: pd.DataFrame, config: dict):
+def train_rf_for_instrument(
+    instrument: str, train_df: pd.DataFrame, val_df: pd.DataFrame, config: dict
+):
     cfg = config.get("models", {}).get("rf", {})
     target_col = config.get("target", {}).get("target_col", "RV_1H")
     seq_len = config["models"]["lstm"]["sequence_length"]
@@ -95,6 +95,7 @@ def train_rf_for_instrument(instrument: str, train_df: pd.DataFrame, val_df: pd.
         scaler=None,
         fit_scaler=True,
         return_metadata=False,
+        scale_features=False,
     )
     val_ds = VolatilityDataset(
         val_df,
@@ -105,6 +106,7 @@ def train_rf_for_instrument(instrument: str, train_df: pd.DataFrame, val_df: pd.
         scaler=train_ds.get_scaler(),
         fit_scaler=False,
         return_metadata=False,
+        scale_features=False,
     )
 
     X_train, y_train = build_xy(train_ds)
@@ -123,9 +125,10 @@ def train_rf_for_instrument(instrument: str, train_df: pd.DataFrame, val_df: pd.
     rf.fit(X_train, y_train)
 
     val_preds = rf.predict(X_val) if len(X_val) > 0 else np.array([])
+    val_preds = np.clip(val_preds, 1e-6, None)
+
     val_metrics = compute_all_metrics(y_val, val_preds)
 
-    # Save model with feature indices (None means use all features in order)
     models_dir = Path("outputs/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -139,7 +142,13 @@ def train_rf_for_instrument(instrument: str, train_df: pd.DataFrame, val_df: pd.
     return val_metrics
 
 
-def train_all_rf(train_df: pd.DataFrame, val_df: pd.DataFrame, instruments: list, config: dict, resume: bool = True):
+def train_all_rf(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    instruments: list,
+    config: dict,
+    resume: bool = True,
+):
     progress = ProgressTracker(progress_file="outputs/progress/rf_training.json")
 
     if not resume:
@@ -153,19 +162,22 @@ def train_all_rf(train_df: pd.DataFrame, val_df: pd.DataFrame, instruments: list
         print("All RF models already completed")
         return progress.get_results_dataframe()
 
+    print(f"Pending instruments: {', '.join(pending)}")
+
     for inst in pending:
+        print(f"Training RF for {inst}")
         try:
             progress.mark_in_progress("rf", inst)
             metrics = train_rf_for_instrument(inst, train_df, val_df, config)
             progress.mark_completed("rf", inst, metrics)
-            print(f"{inst}: Val RMSE={metrics['rmse']:.6f} MAE={metrics['mae']:.6f}")
+            print(f"  Val RMSE: {metrics['rmse']:.6f}, MAE: {metrics['mae']:.6f}")
         except KeyboardInterrupt:
-            print("\nRF training interrupted by user")
+            print("RF training interrupted by user")
             print("Progress has been saved")
             sys.exit(0)
         except Exception as exc:
             progress.mark_failed("rf", inst, str(exc))
-            print(f"{inst}: Failed - {exc}")
+            print(f"  Failed: {exc}")
             continue
 
     return progress.get_results_dataframe()
@@ -173,22 +185,39 @@ def train_all_rf(train_df: pd.DataFrame, val_df: pd.DataFrame, instruments: list
 
 def main():
     parser = argparse.ArgumentParser(description="Train RandomForest experts for MoE")
-    parser.add_argument("--resume", action="store_true", default=True, help="Resume from progress file (default: True)")
+    parser.add_argument(
+        "--resume", action="store_true", default=True, help="Resume from progress file"
+    )
     parser.add_argument("--fresh", action="store_true", help="Ignore previous progress")
-    parser.add_argument("--instruments", type=str, default=None, help="Comma-separated list")
+    parser.add_argument(
+        "--instruments", type=str, default=None, help="Comma-separated list"
+    )
     parser.add_argument("--config", type=str, default="config/config.yaml")
+    parser.add_argument("--status", action="store_true", help="Show progress and exit")
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    if args.status:
+        progress = ProgressTracker(progress_file="outputs/progress/rf_training.json")
+        print(progress.summary())
+        return
+
     resume = args.resume and not args.fresh
 
     print("RANDOM FOREST EXPERT TRAINING")
     print("Loading processed data")
     train_df, val_df, _ = load_data(config)
-    instruments = [i.strip() for i in args.instruments.split(",")] if args.instruments else config["data"]["instruments"]
+
+    instruments = (
+        [i.strip() for i in args.instruments.split(",")]
+        if args.instruments
+        else config["data"]["instruments"]
+    )
     print(f"Training RF for {len(instruments)} instruments")
 
     results_df = train_all_rf(train_df, val_df, instruments, config, resume=resume)
+
     if results_df is None or len(results_df) == 0:
         print("No results to save")
         return
@@ -198,6 +227,11 @@ def main():
     results_file = results_path / "rf_results.csv"
     results_df.to_csv(results_file, index=False)
     print(f"Saved RF results to {results_file}")
+
+    print("RF Performance")
+    print(f"  Average Val RMSE: {results_df['val_rmse'].mean():.6f}")
+    print(f"  Average Val MAE: {results_df['val_mae'].mean():.6f}")
+    print(f"  Average Val R2: {results_df['val_r2'].mean():.6f}")
 
 
 if __name__ == "__main__":

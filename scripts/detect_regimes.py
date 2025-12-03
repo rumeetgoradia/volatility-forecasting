@@ -1,5 +1,3 @@
-# Detect market regimes using HMM or k-means and save regime labels
-
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,7 +5,7 @@ import sys
 import yaml
 
 sys.path.append("src")
-from regimes.clustering import detect_regimes_all_instruments
+from regimes.clustering import detect_regimes_per_instrument, apply_regime_detectors
 from regimes.analysis import RegimeAnalyzer
 from data.validation import assert_hourly_downsampled
 
@@ -55,7 +53,7 @@ def main():
 
     instruments = config["data"]["instruments"]
 
-    print("Detecting regimes on training data")
+    print("Fitting regime detectors on training data")
     if method == "hmm":
         method_kwargs = regime_config["hmm"]
     elif method == "kmeans":
@@ -63,29 +61,31 @@ def main():
     else:
         method_kwargs = {}
 
-    train_regimes = detect_regimes_all_instruments(
+    train_regimes, detectors = detect_regimes_per_instrument(
         train_df, instruments, feature_cols, method, n_regimes, **method_kwargs
     )
 
-    print("Merging regime labels with full data")
-    train_full = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
-
-    print("Detecting regimes on validation data")
-    val_regimes = detect_regimes_all_instruments(
-        val_df, instruments, feature_cols, method, n_regimes, **method_kwargs
-    )
-    val_full = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
-
-    print("Detecting regimes on test data")
-    test_regimes = detect_regimes_all_instruments(
-        test_df, instruments, feature_cols, method, n_regimes, **method_kwargs
-    )
-    test_full = test_df.merge(test_regimes, on=["datetime", "Future"], how="left")
-
-    print("Saving regime labels")
+    print("Saving regime detectors")
     regimes_dir = Path(config["data"]["regimes_path"])
     regimes_dir.mkdir(parents=True, exist_ok=True)
 
+    for instrument, detector in detectors.items():
+        detector_path = regimes_dir / f"detector_{instrument}.pkl"
+        detector.save(str(detector_path))
+        print(f"  Saved detector for {instrument}")
+
+    print("Applying detectors to validation data")
+    val_regimes = apply_regime_detectors(val_df, detectors, feature_cols)
+
+    print("Applying detectors to test data")
+    test_regimes = apply_regime_detectors(test_df, detectors, feature_cols)
+
+    print("Merging regime labels with full data")
+    train_full = train_df.merge(train_regimes, on=["datetime", "Future"], how="left")
+    val_full = val_df.merge(val_regimes, on=["datetime", "Future"], how="left")
+    test_full = test_df.merge(test_regimes, on=["datetime", "Future"], how="left")
+
+    print("Saving regime labels")
     train_regimes.to_csv(regimes_dir / "regime_labels_train.csv", index=False)
     val_regimes.to_csv(regimes_dir / "regime_labels_val.csv", index=False)
     test_regimes.to_csv(regimes_dir / "regime_labels_test.csv", index=False)

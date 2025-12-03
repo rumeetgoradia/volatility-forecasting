@@ -1,5 +1,3 @@
-# Training script for LSTM and TCN models with resumable progress tracking
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -11,7 +9,7 @@ import yaml
 import argparse
 
 sys.path.append("src")
-from data.dataset import create_datasets
+from data.dataset import create_datasets, custom_collate_fn
 from models.lstm import LSTMModel
 from models.tcn import TCNModel
 from training.trainer import Trainer
@@ -33,7 +31,6 @@ def load_data(config: dict):
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
 
-    # Replace infinities and let dataset masking drop remaining NaNs
     for df in (train_df, val_df, test_df):
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
@@ -91,14 +88,21 @@ def train_model_for_instrument(
         target_col=config["target"].get("target_col", "RV_1H"),
         sequence_length=sequence_length,
         instrument=instrument,
+        scale_features=True
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=model_config["batch_size"], shuffle=True
+        train_dataset,
+        batch_size=model_config["batch_size"],
+        shuffle=True,
+        collate_fn=custom_collate_fn,
     )
 
     val_loader = DataLoader(
-        val_dataset, batch_size=model_config["batch_size"], shuffle=False
+        val_dataset,
+        batch_size=model_config["batch_size"],
+        shuffle=False,
+        collate_fn=custom_collate_fn,
     )
 
     input_size = train_dataset.get_feature_dim()
@@ -144,6 +148,8 @@ def train_model_for_instrument(
     )
 
     checkpoint.load_best_model(model)
+
+    torch.save(model.state_dict(), checkpoint_path)
 
     val_preds = trainer.predict(val_loader, show_progress=False)
     val_targets = []
@@ -264,7 +270,7 @@ def main():
     resume = args.resume and not args.fresh
     model_types = [m.strip() for m in args.models.split(",")]
 
-    print("NEURAL MODELS TRAINING")
+    print("NEURAL MODELS TRAINING (UNSCALED)")
 
     config = load_config()
 

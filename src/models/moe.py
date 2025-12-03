@@ -13,66 +13,7 @@ from models.lstm import LSTMModel
 from models.tcn import TCNModel
 from models.rf import RandomForestWrapper
 import joblib
-
-
-class PrecomputedExpert(nn.Module):
-    def __init__(
-        self,
-        preds_df: pd.DataFrame,
-        value_col: str = "predicted",
-        calibrated_col: str = "predicted_calib",
-        allowed_splits: Optional[List[str]] = None,
-        fallback: Optional[float] = None,
-    ):
-        super().__init__()
-
-        df = preds_df.copy()
-        if allowed_splits is not None and "split" in df.columns:
-            df = df[df["split"].isin(allowed_splits)].copy()
-
-        target_col = calibrated_col if calibrated_col in df.columns else value_col
-
-        df["dt_key"] = pd.to_datetime(df["datetime"], errors="coerce")
-        df["dt_key"] = df["dt_key"].dt.tz_localize(None)
-
-        self.lookup = dict(zip(df["dt_key"], df[target_col]))
-
-        finite_vals = pd.to_numeric(df[target_col], errors="coerce")
-        finite_vals = finite_vals[np.isfinite(finite_vals)]
-        self.fallback = (
-            fallback
-            if fallback is not None
-            else (float(np.median(finite_vals)) if len(finite_vals) else 0.0)
-        )
-
-    def forward(self, x: torch.Tensor, timestamps=None):
-        if timestamps is None:
-            raise ValueError(
-                "PrecomputedExpert requires timestamps to align predictions."
-            )
-
-        if torch.is_tensor(timestamps):
-            ts_iter = timestamps.detach().cpu().numpy()
-        elif isinstance(timestamps, (list, tuple)):
-            ts_iter = timestamps
-        else:
-            ts_iter = np.asarray(timestamps)
-
-        preds = []
-        for ts in ts_iter:
-            ts_key = pd.to_datetime(ts, errors="coerce")
-            if ts_key.tzinfo is not None:
-                ts_key = ts_key.tz_convert(None)
-            ts_key = (
-                ts_key.tz_localize(None) if hasattr(ts_key, "tz_localize") else ts_key
-            )
-            pred_val = self.lookup.get(ts_key, self.fallback)
-            preds.append(float(pred_val))
-
-        pred_tensor = torch.tensor(
-            preds, device=x.device, dtype=torch.float32
-        ).unsqueeze(1)
-        return pred_tensor
+from models.precomputed_expert import PrecomputedExpert
 
 
 class MixtureOfExperts(nn.Module):
@@ -130,11 +71,24 @@ class MixtureOfExperts(nn.Module):
         expert_outputs = []
         for name in self.expert_names:
             expert = self.experts[name]
+
+            ts_to_pass = None
+            if name in (
+                "chronos_fintext",
+                "timesfm_fintext",
+                "kronos_mini",
+                "chronos2",
+            ):
+                if timestamps is not None and isinstance(timestamps, dict):
+                    ts_to_pass = timestamps.get("datetime_obj")
+                elif timestamps is not None:
+                    ts_to_pass = timestamps
+
             if self.freeze_experts:
                 with torch.no_grad():
-                    output = self._call_expert(expert, x, timestamps)
+                    output = self._call_expert(expert, x, ts_to_pass)
             else:
-                output = self._call_expert(expert, x, timestamps)
+                output = self._call_expert(expert, x, ts_to_pass)
 
             if len(output.shape) == 1:
                 output = output.unsqueeze(1)
@@ -181,11 +135,24 @@ class MixtureOfExperts(nn.Module):
         expert_outputs = []
         for name in self.expert_names:
             expert = self.experts[name]
+
+            ts_to_pass = None
+            if name in (
+                "chronos_fintext",
+                "timesfm_fintext",
+                "kronos_mini",
+                "chronos2",
+            ):
+                if timestamps is not None and isinstance(timestamps, dict):
+                    ts_to_pass = timestamps.get("datetime_obj")
+                elif timestamps is not None:
+                    ts_to_pass = timestamps
+
             if self.freeze_experts:
                 with torch.no_grad():
-                    output = self._call_expert(expert, x, timestamps)
+                    output = self._call_expert(expert, x, ts_to_pass)
             else:
-                output = self._call_expert(expert, x, timestamps)
+                output = self._call_expert(expert, x, ts_to_pass)
 
             if len(output.shape) == 1:
                 output = output.unsqueeze(1)
@@ -201,8 +168,21 @@ class MixtureOfExperts(nn.Module):
         expert_preds = {}
         for name in self.expert_names:
             expert = self.experts[name]
+
+            ts_to_pass = None
+            if name in (
+                "chronos_fintext",
+                "timesfm_fintext",
+                "kronos_mini",
+                "chronos2",
+            ):
+                if timestamps is not None and isinstance(timestamps, dict):
+                    ts_to_pass = timestamps.get("datetime_obj")
+                elif timestamps is not None:
+                    ts_to_pass = timestamps
+
             with torch.no_grad():
-                output = self._call_expert(expert, x, timestamps)
+                output = self._call_expert(expert, x, ts_to_pass)
             expert_preds[name] = output.cpu().numpy()
         return expert_preds
 
@@ -226,6 +206,7 @@ def load_expert_models(
     input_size: int,
     device: str = "cpu",
     feature_cols: Optional[List[str]] = None,
+    debug: bool = False,
 ) -> Dict[str, Dict[str, nn.Module]]:
     expert_configs = config["moe"]["experts"]
     models_dir = Path("outputs/models")
@@ -298,9 +279,10 @@ def load_expert_models(
                         value_col="predicted",
                         calibrated_col="predicted_calib",
                         allowed_splits=None,
+                        fuzzy_match_window_minutes=1,
                     )
 
-        all_experts[instrument] = instrument_experts
+                    all_experts[instrument] = instrument_experts
 
     return all_experts
 
