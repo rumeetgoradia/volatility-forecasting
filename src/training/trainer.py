@@ -55,6 +55,15 @@ class Trainer:
         else:
             return torch.tensor(regime, dtype=torch.long, device=self.device)
 
+    def _check_for_nans(self, outputs, batch_idx, phase="train"):
+        if torch.isnan(outputs).any() or torch.isinf(outputs).any():
+            print(f"Warning: NaN/Inf detected in {phase} outputs at batch {batch_idx}")
+            print(f"  NaN count: {torch.isnan(outputs).sum().item()}")
+            print(f"  Inf count: {torch.isinf(outputs).sum().item()}")
+            print(f"  Min: {outputs.min().item():.6f}, Max: {outputs.max().item():.6f}")
+            return True
+        return False
+
     def train_epoch(
         self, train_loader: DataLoader, show_progress: bool = False
     ) -> Dict[str, float]:
@@ -73,7 +82,7 @@ class Trainer:
             else train_loader
         )
 
-        for batch in iterator:
+        for batch_idx, batch in enumerate(iterator):
             if len(batch) == 3:
                 X_batch, y_batch, meta_batch = batch
             else:
@@ -82,6 +91,10 @@ class Trainer:
 
             X_batch = X_batch.to(self.device)
             y_batch = y_batch.to(self.device)
+
+            if torch.isnan(X_batch).any() or torch.isnan(y_batch).any():
+                print(f"Warning: NaN in input data at batch {batch_idx}")
+                continue
 
             timestamps = None
             regime = None
@@ -100,6 +113,9 @@ class Trainer:
                         X_batch, timestamps=timestamps, regime=regime
                     )
 
+                    if self._check_for_nans(outputs, batch_idx, "train"):
+                        continue
+
                     pred_loss = self.criterion(outputs, y_batch)
                     regime_loss = F.cross_entropy(
                         regime_logits[valid_mask], regime_tensor[valid_mask]
@@ -113,14 +129,25 @@ class Trainer:
                     all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
                 else:
                     outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    if self._check_for_nans(outputs, batch_idx, "train"):
+                        continue
                     loss = self.criterion(outputs, y_batch)
                     pred_loss = loss
             else:
                 outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                if self._check_for_nans(outputs, batch_idx, "train"):
+                    continue
                 loss = self.criterion(outputs, y_batch)
                 pred_loss = loss
 
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"Warning: NaN/Inf loss at batch {batch_idx}, skipping")
+                continue
+
             loss.backward()
+            
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            
             self.optimizer.step()
 
             total_loss += loss.item() * len(X_batch)
@@ -169,7 +196,7 @@ class Trainer:
         )
 
         with torch.no_grad():
-            for batch in iterator:
+            for batch_idx, batch in enumerate(iterator):
                 if len(batch) == 3:
                     X_batch, y_batch, meta_batch = batch
                 else:
@@ -178,6 +205,9 @@ class Trainer:
 
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
+
+                if torch.isnan(X_batch).any() or torch.isnan(y_batch).any():
+                    continue
 
                 timestamps = None
                 regime = None
@@ -194,6 +224,9 @@ class Trainer:
                             X_batch, timestamps=timestamps, regime=regime
                         )
 
+                        if self._check_for_nans(outputs, batch_idx, "val"):
+                            continue
+
                         pred_loss = self.criterion(outputs, y_batch)
                         regime_loss = F.cross_entropy(
                             regime_logits[valid_mask], regime_tensor[valid_mask]
@@ -207,12 +240,19 @@ class Trainer:
                         all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
                     else:
                         outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                        if self._check_for_nans(outputs, batch_idx, "val"):
+                            continue
                         loss = self.criterion(outputs, y_batch)
                         pred_loss = loss
                 else:
                     outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    if self._check_for_nans(outputs, batch_idx, "val"):
+                        continue
                     loss = self.criterion(outputs, y_batch)
                     pred_loss = loss
+
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
 
                 total_loss += loss.item() * len(X_batch)
                 total_pred_loss += pred_loss.item() * len(X_batch)

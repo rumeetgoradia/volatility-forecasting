@@ -68,7 +68,7 @@ models:
     dropout: 0.2
     sequence_length: 20
     batch_size: 64
-    learning_rate: 0.001
+    learning_rate: 0.0001
     epochs: 50
     patience: 10
 
@@ -78,7 +78,7 @@ models:
     dropout: 0.2
     sequence_length: 20
     batch_size: 64
-    learning_rate: 0.001
+    learning_rate: 0.0001
     epochs: 50
     patience: 10
 
@@ -128,7 +128,7 @@ moe:
     freeze_experts: true
     joint_finetune: false
     batch_size: 64
-    learning_rate: 0.001
+    learning_rate: 0.0001
     epochs: 30
     patience: 10
     regime_loss_weight: 0.1

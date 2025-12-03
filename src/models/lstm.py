@@ -25,9 +25,18 @@ class LSTMModel(nn.Module):
 
         self.fc = nn.Linear(hidden_size, 1)
 
+        self._init_weights()
+
+    def _init_weights(self):
+        for name, param in self.named_parameters():
+            if "weight" in name:
+                nn.init.xavier_uniform_(param)
+            elif "bias" in name:
+                nn.init.constant_(param, 0.01)
+
     def forward(self, x):
         lstm_out, _ = self.lstm(x)
         last_output = lstm_out[:, -1, :]
         output = self.fc(last_output)
-        output = torch.clamp(output, min=0)
+        output = torch.clamp(output, min=1e-6)
         return output

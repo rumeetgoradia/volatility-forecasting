@@ -48,6 +48,17 @@ class TemporalBlock(nn.Module):
         self.relu = nn.ReLU()
         self.padding = padding
 
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.conv1.weight)
+        nn.init.xavier_uniform_(self.conv2.weight)
+        nn.init.constant_(self.conv1.bias, 0.01)
+        nn.init.constant_(self.conv2.bias, 0.01)
+        if self.downsample is not None:
+            nn.init.xavier_uniform_(self.downsample.weight)
+            nn.init.constant_(self.downsample.bias, 0.01)
+
     def forward(self, x):
         out = self.net(x)
 
@@ -97,10 +108,13 @@ class TCNModel(nn.Module):
         self.network = nn.Sequential(*layers)
         self.fc = nn.Linear(num_channels[-1], 1)
 
+        nn.init.xavier_uniform_(self.fc.weight)
+        nn.init.constant_(self.fc.bias, 0.01)
+
     def forward(self, x):
         x = x.transpose(1, 2)
         y = self.network(x)
         y = y[:, :, -1]
         output = self.fc(y)
-        output = torch.clamp(output, min=0)
+        output = torch.clamp(output, min=1e-6)
         return output
