@@ -1,90 +1,109 @@
-# Gating network that predicts expert weights based on current features
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class GatingNetwork(nn.Module):
+class FixedWeightGating(nn.Module):
+    """
+    Simple fixed-weight gating that returns constant weights.
+    """
+
     def __init__(
         self,
-        input_size: int,
         n_experts: int,
-        hidden_size: int = 32,
-        num_layers: int = 2,
-        dropout: float = 0.1,
+        expert_names: list,
+        weights: dict = None,
     ):
-        super(GatingNetwork, self).__init__()
+        super(FixedWeightGating, self).__init__()
 
-        self.input_size = input_size
         self.n_experts = n_experts
-        self.hidden_size = hidden_size
+        self.expert_names = expert_names
 
-        layers = []
+        if weights is None:
+            weights = {name: 1.0 / n_experts for name in expert_names}
 
-        layers.append(nn.Linear(input_size, hidden_size))
-        layers.append(nn.ReLU())
-        layers.append(nn.Dropout(dropout))
+        weight_values = [weights.get(name, 1.0 / n_experts) for name in expert_names]
+        weight_sum = sum(weight_values)
+        weight_values = [w / weight_sum for w in weight_values]
 
-        for _ in range(num_layers - 1):
-            layers.append(nn.Linear(hidden_size, hidden_size))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-
-        layers.append(nn.Linear(hidden_size, n_experts))
-
-        self.network = nn.Sequential(*layers)
+        self.fixed_weights = nn.Parameter(
+            torch.tensor(weight_values, dtype=torch.float32), requires_grad=False
+        )
 
     def forward(self, x):
-        logits = self.network(x)
-        weights = F.softmax(logits, dim=-1)
+        batch_size = x.size(0)
+        weights = self.fixed_weights.unsqueeze(0).expand(batch_size, -1)
         return weights
 
-    def forward_with_logits(self, x):
-        logits = self.network(x)
-        weights = F.softmax(logits, dim=-1)
-        return weights, logits
 
+class RegimeAwareFixedGating(nn.Module):
+    """
+    Fixed-weight gating that returns different weights per regime.
+    """
 
-class SupervisedGatingNetwork(nn.Module):
     def __init__(
         self,
-        input_size: int,
         n_experts: int,
         n_regimes: int,
-        hidden_size: int = 32,
-        num_layers: int = 2,
-        dropout: float = 0.1,
+        expert_names: list,
+        regime_weights: dict = None,
     ):
-        super(SupervisedGatingNetwork, self).__init__()
+        super(RegimeAwareFixedGating, self).__init__()
 
-        self.input_size = input_size
         self.n_experts = n_experts
         self.n_regimes = n_regimes
+        self.expert_names = expert_names
 
-        layers = []
+        if regime_weights is None:
+            regime_weights = {
+                0: {
+                    "har_rv": 0.5,
+                    "lstm": 0.2,
+                    "tcn": 0.15,
+                    "chronos_fintext": 0.1,
+                    "timesfm_fintext": 0.05,
+                },
+                1: {
+                    "har_rv": 0.3,
+                    "lstm": 0.3,
+                    "tcn": 0.2,
+                    "chronos_fintext": 0.1,
+                    "timesfm_fintext": 0.1,
+                },
+                2: {
+                    "har_rv": 0.1,
+                    "lstm": 0.4,
+                    "tcn": 0.3,
+                    "chronos_fintext": 0.1,
+                    "timesfm_fintext": 0.1,
+                },
+            }
 
-        layers.append(nn.Linear(input_size, hidden_size))
-        layers.append(nn.ReLU())
-        layers.append(nn.Dropout(dropout))
+        weight_matrix = []
+        for regime in range(n_regimes):
+            regime_dict = regime_weights.get(regime, {})
+            weight_values = [
+                regime_dict.get(name, 1.0 / n_experts) for name in expert_names
+            ]
+            weight_sum = sum(weight_values)
+            weight_values = [w / weight_sum for w in weight_values]
+            weight_matrix.append(weight_values)
 
-        for _ in range(num_layers - 1):
-            layers.append(nn.Linear(hidden_size, hidden_size))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
+        self.regime_weights = nn.Parameter(
+            torch.tensor(weight_matrix, dtype=torch.float32), requires_grad=False
+        )
 
-        self.feature_network = nn.Sequential(*layers)
+    def forward(self, x, regime=None):
+        batch_size = x.size(0)
 
-        self.regime_classifier = nn.Linear(hidden_size, n_regimes)
-        self.expert_selector = nn.Linear(hidden_size, n_experts)
+        if regime is None:
+            avg_weights = self.regime_weights.mean(dim=0)
+            return avg_weights.unsqueeze(0).expand(batch_size, -1)
 
-    def forward(self, x):
-        features = self.feature_network(x)
-        expert_weights = F.softmax(self.expert_selector(features), dim=-1)
-        return expert_weights
+        if not torch.is_tensor(regime):
+            regime = torch.tensor(regime, dtype=torch.long, device=x.device)
 
-    def forward_with_regime(self, x):
-        features = self.feature_network(x)
-        regime_logits = self.regime_classifier(features)
-        expert_weights = F.softmax(self.expert_selector(features), dim=-1)
-        return expert_weights, regime_logits
+        regime = regime.to(x.device).clamp(0, self.n_regimes - 1)
+
+        weights = self.regime_weights.to(x.device)[regime]
+        return weights

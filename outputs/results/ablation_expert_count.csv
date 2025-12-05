@@ -1,0 +1,5 @@
+configuration,n_experts,rmse,r2
+2 experts (HAR-RV + LSTM),2,0.0022430802,0.37571967
+3 experts (+ TCN),3,0.0021500334,0.4264378
+4 experts (+ Chronos),4,0.0021176152,0.44360375
+5 experts (+ TimesFM),5,0.0021096254,0.44779438

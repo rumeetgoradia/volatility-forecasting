@@ -1,108 +1,84 @@
-#  Temporal Convolutional Network for volatility forecasting
-
 import torch
 import torch.nn as nn
-from typing import List
-
-
-class TemporalBlock(nn.Module):
-    def __init__(
-        self,
-        n_inputs: int,
-        n_outputs: int,
-        kernel_size: int,
-        stride: int,
-        dilation: int,
-        padding: int,
-        dropout: float = 0.2,
-    ):
-        super(TemporalBlock, self).__init__()
-
-        self.conv1 = nn.Conv1d(
-            n_inputs,
-            n_outputs,
-            kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-        )
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(dropout)
-
-        self.conv2 = nn.Conv1d(
-            n_outputs,
-            n_outputs,
-            kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-        )
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(dropout)
-
-        self.net = nn.Sequential(
-            self.conv1, self.relu1, self.dropout1, self.conv2, self.relu2, self.dropout2
-        )
-
-        self.downsample = (
-            nn.Conv1d(n_inputs, n_outputs, 1) if n_inputs != n_outputs else None
-        )
-        self.relu = nn.ReLU()
-        self.padding = padding
-
-    def forward(self, x):
-        out = self.net(x)
-
-        if self.padding > 0:
-            out = out[:, :, : -self.padding]
-
-        res = x if self.downsample is None else self.downsample(x)
-
-        if out.size(2) < res.size(2):
-            res = res[:, :, : out.size(2)]
-        elif out.size(2) > res.size(2):
-            out = out[:, :, : res.size(2)]
-
-        return self.relu(out + res)
+import numpy as np
 
 
 class TCNModel(nn.Module):
     def __init__(
         self,
         input_size: int,
-        num_channels: List[int] = [32, 64, 128],
+        hidden_channels: int = 64,
+        num_layers: int = 3,
         kernel_size: int = 3,
         dropout: float = 0.2,
+        target_mean: float = 0.005,
     ):
         super(TCNModel, self).__init__()
 
+        self.target_mean = target_mean
+
         layers = []
-        num_levels = len(num_channels)
+        in_channels = input_size
 
-        for i in range(num_levels):
-            dilation_size = 2**i
-            in_channels = input_size if i == 0 else num_channels[i - 1]
-            out_channels = num_channels[i]
-            padding = (kernel_size - 1) * dilation_size
+        for i in range(num_layers):
+            dilation = 2**i
+            padding = (kernel_size - 1) * dilation
 
-            layers.append(
-                TemporalBlock(
-                    in_channels,
-                    out_channels,
-                    kernel_size,
-                    stride=1,
-                    dilation=dilation_size,
-                    padding=padding,
-                    dropout=dropout,
-                )
+            layers.extend(
+                [
+                    nn.Conv1d(
+                        in_channels,
+                        hidden_channels,
+                        kernel_size,
+                        padding=padding,
+                        dilation=dilation,
+                    ),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                    nn.BatchNorm1d(hidden_channels),
+                ]
             )
+            in_channels = hidden_channels
 
-        self.network = nn.Sequential(*layers)
-        self.fc = nn.Linear(num_channels[-1], 1)
+        self.tcn = nn.Sequential(*layers)
+
+        self.fc = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_channels // 2, 1),
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for layer in self.tcn:
+            if isinstance(layer, nn.Conv1d):
+                nn.init.kaiming_normal_(
+                    layer.weight, mode="fan_out", nonlinearity="relu"
+                )
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, 0)
+            elif isinstance(layer, nn.BatchNorm1d):
+                nn.init.constant_(layer.weight, 1)
+                nn.init.constant_(layer.bias, 0)
+
+        for layer in self.fc:
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(
+                    layer.weight, mode="fan_in", nonlinearity="relu"
+                )
+                if layer.bias is not None:
+                    nn.init.constant_(layer.bias, 0)
+
+        final_layer = self.fc[-1]
+        final_layer.bias.data.fill_(np.log(self.target_mean + 1e-8))
 
     def forward(self, x):
         x = x.transpose(1, 2)
-        y = self.network(x)
-        y = y[:, :, -1]
-        output = self.fc(y)
+        x = self.tcn(x)
+        x = x[:, :, -1]
+        output = self.fc(x)
+        output = torch.exp(output)
+        output = torch.clamp(output, min=1e-6, max=1.0)
         return output

@@ -114,22 +114,22 @@ class FeatureEngineer:
 
         return df
 
-    def add_volume_features(
-        self, df: pd.DataFrame, windows: List[int] = [20, 60]
-    ) -> pd.DataFrame:
+    def add_volume_features(self, df: pd.DataFrame, windows: List[int] = [20, 60]) -> pd.DataFrame:
         df = df.copy()
-
         for window in windows:
-            df[f"volume_ma_{window}"] = df.groupby("Future")["volume"].transform(
-                lambda x: x.rolling(window=window, min_periods=1).mean()
+            df[f"volume_ma_{window}"] = (
+                df.groupby("Future")["volume"]
+                .shift(1)  # :white_check_mark: Shift first
+                .rolling(window=window, min_periods=1)
+                .mean()
             )
-
-            df[f"volume_std_{window}"] = df.groupby("Future")["volume"].transform(
-                lambda x: x.rolling(window=window, min_periods=1).std()
+            df[f"volume_std_{window}"] = (
+                df.groupby("Future")["volume"]
+                .shift(1)  # :white_check_mark: Shift first
+                .rolling(window=window, min_periods=1)
+                .std()
             )
-
-        df["volume_log"] = np.log1p(df["volume"])
-
+        df["volume_log"] = np.log1p(df.groupby("Future")["volume"].shift(1))  # :white_check_mark: Shift
         return df
 
     def add_intraday_simple_features(
@@ -145,7 +145,9 @@ class FeatureEngineer:
         """
         df = df.copy()
         if "log_returns" not in df.columns:
-            df["log_returns"] = np.log(df["last"] / df.groupby("Future")["last"].shift(1))
+            df["log_returns"] = np.log(
+                df["last"] / df.groupby("Future")["last"].shift(1)
+            )
 
         abs_ret = df["log_returns"].abs()
         sq_ret = df["log_returns"] ** 2
@@ -153,21 +155,12 @@ class FeatureEngineer:
 
         for minutes in rv_windows_minutes:
             window = max(1, int(round(minutes / bar_minutes)))
-            rv = (
-                sq_ret.rolling(window=window, min_periods=window)
-                .sum()
-                .shift(1)
-            )
+            rv = sq_ret.rolling(window=window, min_periods=window).sum().shift(1)
             df[f"RV_{minutes}m"] = np.sqrt(np.clip(rv, a_min=0, a_max=None))
 
         for minutes in rq_windows_minutes:
             window = max(1, int(round(minutes / bar_minutes)))
-            rq = (
-                (sq_ret ** 2)
-                .rolling(window=window, min_periods=window)
-                .sum()
-                .shift(1)
-            )
+            rq = (sq_ret**2).rolling(window=window, min_periods=window).sum().shift(1)
             df[f"RQ_{minutes}m"] = rq
 
         for minutes in vol_corr_windows_minutes:
@@ -189,21 +182,21 @@ class FeatureEngineer:
     def create_har_features(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
 
-        if "RV_1D" not in df.columns:
-            raise ValueError("Daily RV not found. Compute RV first.")
-
+        # Shift once, then compute rolling
         df["RV_daily"] = df.groupby("Future")["RV_1D"].shift(1)
 
         df["RV_weekly"] = (
             df.groupby("Future")["RV_1D"]
-            .transform(lambda x: x.rolling(window=5, min_periods=1).mean())
-            .shift(1)
+            .shift(1)  # ✅ Shift first
+            .rolling(window=5, min_periods=1)
+            .mean()
         )
 
         df["RV_monthly"] = (
             df.groupby("Future")["RV_1D"]
-            .transform(lambda x: x.rolling(window=22, min_periods=1).mean())
             .shift(1)
+            .rolling(window=22, min_periods=1)
+            .mean()
         )
 
         return df
