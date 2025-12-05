@@ -10,6 +10,7 @@ from models.har_rv import HARRV
 from training.progress_tracker import ProgressTracker
 from evaluation.metrics import compute_all_metrics
 from data.validation import assert_hourly_downsampled
+from data.dataset import create_datasets
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -36,6 +37,27 @@ def load_data(config: dict):
     return train_df, val_df, test_df
 
 
+def get_feature_columns(df: pd.DataFrame) -> list:
+    exclude_cols = [
+        "timestamp",
+        "Future",
+        "datetime",
+        "date",
+        "week",
+        "RV_1D",
+        "RV_1W",
+        "RV_1M",
+        "RV_1H",
+        "returns",
+        "log_returns",
+        "time_diff",
+        "is_gap",
+        "is_outlier",
+        "regime",
+    ]
+    return [col for col in df.columns if col not in exclude_cols]
+
+
 def train_har_rv_for_instrument(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
@@ -46,18 +68,43 @@ def train_har_rv_for_instrument(
     positive: bool = True,
     output_dir: Path = Path("outputs/models"),
 ):
+    all_feature_cols = get_feature_columns(train_df)
+    sequence_length = 20
 
-    train_inst = train_df[train_df["Future"] == instrument].copy()
-    val_inst = val_df[val_df["Future"] == instrument].copy()
+    train_dataset, val_dataset, _ = create_datasets(
+        train_df,
+        val_df,
+        val_df,
+        feature_cols=all_feature_cols,
+        target_col=target_col,
+        sequence_length=sequence_length,
+        instrument=instrument,
+        scale_features=True,
+    )
 
     if feature_cols is None:
         feature_cols = ["RV_H1", "RV_H6", "RV_H24"]
 
-    X_train = train_inst[feature_cols]
-    y_train = train_inst[target_col]
+    har_indices = [
+        all_feature_cols.index(col) for col in feature_cols if col in all_feature_cols
+    ]
 
-    X_val = val_inst[feature_cols]
-    y_val = val_inst[target_col]
+    X_train_list = []
+    y_train_list = []
+    for idx in train_dataset.valid_indices:
+        X_train_list.append(train_dataset.features_scaled[idx, har_indices])
+        y_train_list.append(train_dataset.targets[idx])
+
+    X_val_list = []
+    y_val_list = []
+    for idx in val_dataset.valid_indices:
+        X_val_list.append(val_dataset.features_scaled[idx, har_indices])
+        y_val_list.append(val_dataset.targets[idx])
+
+    X_train = pd.DataFrame(X_train_list, columns=feature_cols)
+    y_train = pd.Series(y_train_list)
+    X_val = pd.DataFrame(X_val_list, columns=feature_cols)
+    y_val = pd.Series(y_val_list)
 
     mask_train = X_train.notna().all(axis=1) & y_train.notna()
     mask_val = X_val.notna().all(axis=1) & y_val.notna()
@@ -66,7 +113,9 @@ def train_har_rv_for_instrument(
     val_nan_pct = (~mask_val).mean() * 100
 
     if train_nan_pct > 5 or val_nan_pct > 5:
-        print(f"  Warning: Dropping {train_nan_pct:.1f}% train, {val_nan_pct:.1f}% val samples due to NaN")
+        print(
+            f"  Warning: Dropping {train_nan_pct:.1f}% train, {val_nan_pct:.1f}% val samples due to NaN"
+        )
 
     X_train_clean = X_train[mask_train]
     y_train_clean = y_train[mask_train]
@@ -74,7 +123,9 @@ def train_har_rv_for_instrument(
     y_val_clean = y_val[mask_val]
 
     if len(X_train_clean) < 100:
-        raise ValueError(f"Insufficient training data after NaN removal: {len(X_train_clean)}")
+        raise ValueError(
+            f"Insufficient training data after NaN removal: {len(X_train_clean)}"
+        )
 
     model = HARRV(
         name=f"HAR-RV_{instrument}",
@@ -93,6 +144,11 @@ def train_har_rv_for_instrument(
     model_path = output_dir / f"har_rv_{instrument}.pkl"
     model.save(str(model_path))
 
+    print(
+        f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}"
+    )
+    print(f"  Val R2: {val_metrics['r2']:.6f}")
+
     return train_metrics, val_metrics
 
 
@@ -104,7 +160,6 @@ def train_all_har_rv(
     target_cfg: dict = None,
     har_cfg: dict = None,
 ):
-
     progress = ProgressTracker(progress_file="outputs/progress/baseline_training.json")
 
     if not resume:
@@ -125,8 +180,12 @@ def train_all_har_rv(
 
     print(f"Pending instruments: {', '.join(pending)}")
 
-    target_col = "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
-    har_windows = [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
+    target_col = (
+        "RV_1H" if target_cfg is None else target_cfg.get("target_col", "RV_1H")
+    )
+    har_windows = (
+        [1, 6, 24] if target_cfg is None else target_cfg.get("har_windows", [1, 6, 24])
+    )
     feature_cols = [f"RV_H{w}" for w in har_windows]
 
     alpha = 0.01 if har_cfg is None else har_cfg.get("alpha", 0.01)
@@ -161,14 +220,9 @@ def train_all_har_rv(
 
             progress.mark_completed("har_rv", instrument, metrics)
 
-            print(f"  Train RMSE: {train_metrics['rmse']:.6f}, Val RMSE: {val_metrics['rmse']:.6f}")
-            print(f"  Train MAE: {train_metrics['mae']:.6f}, Val MAE: {val_metrics['mae']:.6f}")
-            print(f"  Val R2: {val_metrics['r2']:.6f}")
-
         except KeyboardInterrupt:
             print("Training interrupted by user")
             print("Progress has been saved")
-            print("Resume with: python scripts/train_baseline.py --resume")
             sys.exit(0)
 
         except Exception as e:
@@ -182,25 +236,13 @@ def train_all_har_rv(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train HAR-RV baseline models")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        default=True,
-        help="Resume from last checkpoint (default: True)",
+    parser = argparse.ArgumentParser(
+        description="Train HAR-RV baseline models with scaled features"
     )
-    parser.add_argument(
-        "--fresh", action="store_true", help="Start fresh, ignore previous progress"
-    )
-    parser.add_argument(
-        "--instruments",
-        type=str,
-        default=None,
-        help="Comma-separated list of instruments to train (default: all)",
-    )
-    parser.add_argument(
-        "--status", action="store_true", help="Show training progress and exit"
-    )
+    parser.add_argument("--resume", action="store_true", default=True)
+    parser.add_argument("--fresh", action="store_true")
+    parser.add_argument("--instruments", type=str, default=None)
+    parser.add_argument("--status", action="store_true")
 
     args = parser.parse_args()
 
@@ -213,7 +255,7 @@ def main():
 
     resume = args.resume and not args.fresh
 
-    print("HAR-RV BASELINE TRAINING")
+    print("HAR-RV BASELINE TRAINING (SCALED FEATURES)")
 
     config = load_config()
 
@@ -221,7 +263,6 @@ def main():
     train_df, val_df, test_df = load_data(config)
     print(f"Train: {len(train_df)} records")
     print(f"Val: {len(val_df)} records")
-    print(f"Test: {len(test_df)} records")
 
     if args.instruments:
         instruments = [i.strip() for i in args.instruments.split(",")]
@@ -248,14 +289,18 @@ def main():
     results_path = Path("outputs/results")
     results_path.mkdir(parents=True, exist_ok=True)
 
-    results_file = results_path / "baseline_results.csv"
+    results_file = results_path / "baseline_results_scaled.csv"
     results_df.to_csv(results_file, index=False)
     print(f"Saved results to {results_file}")
 
     print("Summary statistics")
-    print(results_df[["instrument", "val_rmse", "val_mae", "val_qlike", "val_r2"]].to_string(index=False))
+    print(
+        results_df[["instrument", "val_rmse", "val_mae", "val_r2"]].to_string(
+            index=False
+        )
+    )
 
-    avg_metrics = results_df[["val_rmse", "val_mae", "val_qlike", "val_r2"]].mean()
+    avg_metrics = results_df[["val_rmse", "val_mae", "val_r2"]].mean()
     print("Average validation metrics")
     for metric, value in avg_metrics.items():
         print(f"  {metric}: {value:.6f}")
