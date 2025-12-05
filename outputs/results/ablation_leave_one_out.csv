@@ -1,0 +1,6 @@
+removed_expert,rmse,impact_pct,interpretation
+har_rv,0.001950385,-7.548275,helps
+lstm,0.002273093,7.7486553,hurts
+tcn,0.0021867692,3.6567523,hurts
+chronos_fintext,0.0021291792,0.92688566,hurts
+timesfm_fintext,0.0021176152,0.37873152,hurts

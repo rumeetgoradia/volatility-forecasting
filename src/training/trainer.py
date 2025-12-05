@@ -9,6 +9,7 @@ import sys
 
 sys.path.append("src")
 from evaluation.metrics import compute_all_metrics
+from models.gating import compute_diversity_loss, compute_balance_loss
 
 
 class Trainer:
@@ -19,12 +20,16 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         device: str = "cpu",
         regime_loss_weight: float = 0.1,
+        diversity_loss_weight: float = 0.1,
+        balance_loss_weight: float = 0.2,
     ):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
         self.device = device
         self.regime_loss_weight = regime_loss_weight
+        self.diversity_loss_weight = diversity_loss_weight
+        self.balance_loss_weight = balance_loss_weight
         self.model.to(device)
 
         self.history = {
@@ -36,14 +41,16 @@ class Trainer:
             "val_regime_loss": [],
             "train_regime_acc": [],
             "val_regime_acc": [],
+            "train_diversity_loss": [],
+            "train_balance_loss": [],
         }
 
         self.use_regime_supervision = self._check_regime_supervision()
 
     def _check_regime_supervision(self) -> bool:
-        if hasattr(self.model, 'gating'):
+        if hasattr(self.model, "gating"):
             gating = self.model.gating
-            return hasattr(gating, 'forward_with_regime')
+            return hasattr(gating, "forward_with_regime")
         return False
 
     def _prepare_regime_tensor(self, regime):
@@ -56,27 +63,23 @@ class Trainer:
             return torch.tensor(regime, dtype=torch.long, device=self.device)
 
     def _extract_timestamps(self, meta_batch):
-        """Extract timestamps from metadata in consistent format."""
         if meta_batch is None:
             return None
 
         if not isinstance(meta_batch, dict):
             return None
 
-        if 'datetime_obj' in meta_batch:
+        if "datetime_obj" in meta_batch:
             return meta_batch
 
-        if 'datetime' in meta_batch:
-            return {'datetime_obj': meta_batch['datetime']}
+        if "datetime" in meta_batch:
+            return {"datetime_obj": meta_batch["datetime"]}
 
         return None
 
     def _check_for_nans(self, outputs, batch_idx, phase="train"):
         if torch.isnan(outputs).any() or torch.isinf(outputs).any():
             print(f"Warning: NaN/Inf detected in {phase} outputs at batch {batch_idx}")
-            print(f"  NaN count: {torch.isnan(outputs).sum().item()}")
-            print(f"  Inf count: {torch.isinf(outputs).sum().item()}")
-            print(f"  Min: {outputs.min().item():.6f}, Max: {outputs.max().item():.6f}")
             return True
         return False
 
@@ -87,6 +90,8 @@ class Trainer:
         total_loss = 0.0
         total_pred_loss = 0.0
         total_regime_loss = 0.0
+        total_diversity_loss = 0.0
+        total_balance_loss = 0.0
         all_preds = []
         all_targets = []
         all_regime_preds = []
@@ -109,7 +114,6 @@ class Trainer:
             y_batch = y_batch.to(self.device)
 
             if torch.isnan(X_batch).any() or torch.isnan(y_batch).any():
-                print(f"Warning: NaN in input data at batch {batch_idx}")
                 continue
 
             timestamps = self._extract_timestamps(meta_batch)
@@ -122,9 +126,21 @@ class Trainer:
                 valid_mask = regime_tensor >= 0
 
                 if valid_mask.sum() > 0:
-                    outputs, regime_logits = self._forward_with_regime(
+                    outputs, regime_logits = self.model.forward_with_regime(
                         X_batch, timestamps=timestamps, regime=regime
                     )
+
+                    gating_input = (
+                        X_batch[:, -1, :] if len(X_batch.shape) == 3 else X_batch
+                    )
+                    if (
+                        hasattr(self.model, "use_regime_feature")
+                        and self.model.use_regime_feature
+                    ):
+                        regime_float = regime_tensor.float().view(-1, 1)
+                        gating_input = torch.cat([gating_input, regime_float], dim=1)
+
+                    weights = self.model.gating(gating_input)
 
                     if self._check_for_nans(outputs, batch_idx, "train"):
                         continue
@@ -133,34 +149,42 @@ class Trainer:
                     regime_loss = F.cross_entropy(
                         regime_logits[valid_mask], regime_tensor[valid_mask]
                     )
-                    loss = pred_loss + self.regime_loss_weight * regime_loss
+
+                    diversity_loss = compute_diversity_loss(weights, target_entropy=1.0)
+                    balance_loss = compute_balance_loss(weights, max_weight=0.6)
+
+                    loss = (
+                        pred_loss
+                        + self.regime_loss_weight * regime_loss
+                        + self.diversity_loss_weight * diversity_loss
+                        + self.balance_loss_weight * balance_loss
+                    )
 
                     total_regime_loss += regime_loss.item() * valid_mask.sum().item()
+                    total_diversity_loss += diversity_loss.item() * len(X_batch)
+                    total_balance_loss += balance_loss.item() * len(X_batch)
 
                     regime_preds = regime_logits.argmax(dim=1)
                     all_regime_preds.extend(regime_preds[valid_mask].cpu().numpy())
                     all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
                 else:
-                    outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    outputs = self.model(X_batch, timestamps=timestamps, regime=regime)
                     if self._check_for_nans(outputs, batch_idx, "train"):
                         continue
                     loss = self.criterion(outputs, y_batch)
                     pred_loss = loss
             else:
-                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                outputs = self.model(X_batch, timestamps=timestamps, regime=regime)
                 if self._check_for_nans(outputs, batch_idx, "train"):
                     continue
                 loss = self.criterion(outputs, y_batch)
                 pred_loss = loss
 
             if torch.isnan(loss) or torch.isinf(loss):
-                print(f"Warning: NaN/Inf loss at batch {batch_idx}, skipping")
                 continue
 
             loss.backward()
-
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-
             self.optimizer.step()
 
             total_loss += loss.item() * len(X_batch)
@@ -184,9 +208,16 @@ class Trainer:
 
         if len(all_regime_preds) > 0:
             avg_regime_loss = total_regime_loss / len(all_regime_preds)
-            regime_acc = np.mean(np.array(all_regime_preds) == np.array(all_regime_targets))
+            regime_acc = np.mean(
+                np.array(all_regime_preds) == np.array(all_regime_targets)
+            )
             result["regime_loss"] = avg_regime_loss
             result["regime_acc"] = regime_acc
+
+        if total_diversity_loss > 0:
+            result["diversity_loss"] = total_diversity_loss / len(train_loader.dataset)
+        if total_balance_loss > 0:
+            result["balance_loss"] = total_balance_loss / len(train_loader.dataset)
 
         return result
 
@@ -230,7 +261,7 @@ class Trainer:
                     valid_mask = regime_tensor >= 0
 
                     if valid_mask.sum() > 0:
-                        outputs, regime_logits = self._forward_with_regime(
+                        outputs, regime_logits = self.model.forward_with_regime(
                             X_batch, timestamps=timestamps, regime=regime
                         )
 
@@ -243,19 +274,25 @@ class Trainer:
                         )
                         loss = pred_loss + self.regime_loss_weight * regime_loss
 
-                        total_regime_loss += regime_loss.item() * valid_mask.sum().item()
+                        total_regime_loss += (
+                            regime_loss.item() * valid_mask.sum().item()
+                        )
 
                         regime_preds = regime_logits.argmax(dim=1)
                         all_regime_preds.extend(regime_preds[valid_mask].cpu().numpy())
-                        all_regime_targets.extend(regime_tensor[valid_mask].cpu().numpy())
+                        all_regime_targets.extend(
+                            regime_tensor[valid_mask].cpu().numpy()
+                        )
                     else:
-                        outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                        outputs = self.model(
+                            X_batch, timestamps=timestamps, regime=regime
+                        )
                         if self._check_for_nans(outputs, batch_idx, "val"):
                             continue
                         loss = self.criterion(outputs, y_batch)
                         pred_loss = loss
                 else:
-                    outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                    outputs = self.model(X_batch, timestamps=timestamps, regime=regime)
                     if self._check_for_nans(outputs, batch_idx, "val"):
                         continue
                     loss = self.criterion(outputs, y_batch)
@@ -285,7 +322,9 @@ class Trainer:
 
         if len(all_regime_preds) > 0:
             avg_regime_loss = total_regime_loss / len(all_regime_preds)
-            regime_acc = np.mean(np.array(all_regime_preds) == np.array(all_regime_targets))
+            regime_acc = np.mean(
+                np.array(all_regime_preds) == np.array(all_regime_targets)
+            )
             result["regime_loss"] = avg_regime_loss
             result["regime_acc"] = regime_acc
 
@@ -323,6 +362,13 @@ class Trainer:
                 self.history["val_regime_loss"].append(val_metrics["regime_loss"])
                 self.history["val_regime_acc"].append(val_metrics["regime_acc"])
 
+            if "diversity_loss" in train_metrics:
+                self.history["train_diversity_loss"].append(
+                    train_metrics["diversity_loss"]
+                )
+            if "balance_loss" in train_metrics:
+                self.history["train_balance_loss"].append(train_metrics["balance_loss"])
+
             if verbose:
                 msg = (
                     f"Epoch {epoch+1}/{epochs} - "
@@ -331,7 +377,9 @@ class Trainer:
                     f"val_rmse: {val_metrics['rmse']:.6f}"
                 )
                 if "regime_acc" in val_metrics:
-                    msg += f", val_regime_acc: {val_metrics['regime_acc']:.4f}"
+                    msg += f", regime_acc: {val_metrics['regime_acc']:.4f}"
+                if "diversity_loss" in train_metrics:
+                    msg += f", div_loss: {train_metrics['diversity_loss']:.4f}"
                 print(msg)
 
             if show_progress:
@@ -341,7 +389,7 @@ class Trainer:
                     "val_rmse": val_metrics["rmse"],
                 }
                 if "regime_acc" in val_metrics:
-                    postfix["val_regime_acc"] = val_metrics["regime_acc"]
+                    postfix["regime_acc"] = val_metrics["regime_acc"]
                 epoch_iterator.set_postfix(postfix)
 
             if checkpoint is not None:
@@ -379,7 +427,9 @@ class Trainer:
                 timestamps = self._extract_timestamps(meta_batch)
                 regime = meta_batch.get("regime") if meta_batch else None
 
-                outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
+                outputs = self._forward_model(
+                    X_batch, timestamps=timestamps, regime=regime
+                )
                 all_preds.extend(outputs.cpu().numpy().flatten())
 
         return np.array(all_preds)
@@ -394,8 +444,10 @@ class Trainer:
                 return self.model(X_batch)
 
     def _forward_with_regime(self, X_batch, timestamps=None, regime=None):
-        if hasattr(self.model, 'forward_with_regime'):
-            return self.model.forward_with_regime(X_batch, timestamps=timestamps, regime=regime)
+        if hasattr(self.model, "forward_with_regime"):
+            return self.model.forward_with_regime(
+                X_batch, timestamps=timestamps, regime=regime
+            )
         else:
             outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
             return outputs, None

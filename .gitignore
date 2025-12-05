@@ -50,4 +50,7 @@ tensorboard/
 # OS
 .DS_Store
 Thumbs.db
-outputs/
+
+outputs/models
+outputs/predictions
+outputs/progress
