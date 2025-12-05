@@ -51,6 +51,4 @@ tensorboard/
 .DS_Store
 Thumbs.db
 
-outputs/models
-outputs/predictions
-outputs/progress
+outputs/

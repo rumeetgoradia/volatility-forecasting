@@ -1,3 +1,0 @@
-Regime-aware RMSE: 0.002110
-Uniform RMSE: 0.002100
-Improvement: -0.44%

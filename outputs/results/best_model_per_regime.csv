@@ -1,4 +1,0 @@
-regime,regime_name,best_model,best_rmse,second_model,second_rmse,n_samples
-0,Low Volatility,lstm,0.0010844463809077153,tcn,0.001131722071712399,23279
-1,Medium Volatility,lstm,0.0013651346477458394,ensemble,0.0013796633978490128,5679
-2,High Volatility,lstm,0.0038076550689065598,ensemble,0.003864756119994485,3069
