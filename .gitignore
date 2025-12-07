@@ -51,4 +51,5 @@ tensorboard/
 .DS_Store
 Thumbs.db
 
+data/
 outputs/
