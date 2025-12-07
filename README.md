@@ -1,334 +1,126 @@
 # Regime-Aware Mixture-of-Experts for Intraday Volatility Forecasting
 
-A machine learning framework that combines classical econometric models (HAR-RV) with deep learning models (LSTM, TCN) using a regime-aware Mixture-of-Experts architecture for volatility forecasting.
+This repository contains the implementation of a **Regime-Aware Mixture-of-Experts (MoE)** framework for 1-hour ahead realized volatility forecasting on equity index futures. The system combines classical econometric models (HAR-RV), deep learning architectures (LSTM, TCN), and pretrained foundation time-series models (Chronos, TimesFM).
 
-## Project Overview
-
-This project implements a novel approach to volatility forecasting by:
-1. Detecting market regimes (low, medium, high volatility) using Hidden Markov Models
-2. Training multiple expert models: HAR-RV, LSTM, and TCN
-3. Combining experts using a gating network that learns which expert to use based on market conditions
-
-## Requirements
-
-- Python 3.8+
-- 16GB+ RAM recommended
-- GPU optional (faster training for neural models)
-
-## Setup Instructions
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/your-username/volatility-forecasting.git
-cd volatility-forecasting
-```
-
-### 2. Create Virtual Environment
-
-```bash
-# Using venv
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Or using conda
-conda create -n volatility python=3.10
-conda activate volatility
-```
-
-### 3. Install Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Prepare Data
-
-Place your raw data file in the `data/raw/` directory:
-
-```bash
-mkdir -p data/raw
-# Copy your futures_data.parquet file to data/raw/
-```
-
-Update `config/config.yaml` with the correct path:
-
-```yaml
-data:
-  raw_path: "data/raw/futures_data.parquet"
-```
-
-## Running the Pipeline
-
-Execute the following scripts in order:
-
-### Step 1: Data Preparation
-
-Process raw data, compute features, and create train/val/test splits:
-
-```bash
-python scripts/prepare_data.py
-```
-
-**Output:**
-- `data/processed/train.parquet` - Training data (2000-2018)
-- `data/processed/val.parquet` - Validation data (2019-2021)
-- `data/processed/test.parquet` - Test data (2022-2025)
-
-**Expected runtime:** 5-10 minutes
-
-### Step 2: Train HAR-RV Baseline
-
-Train the classical HAR-RV model for each instrument:
-
-```bash
-python scripts/train_baseline.py
-```
-
-**Output:**
-- `outputs/models/har_rv_*.pkl` - Saved HAR-RV models
-- `outputs/results/baseline_results.csv` - Performance metrics
-- `outputs/progress/baseline_training.json` - Progress tracker
-
-**Expected runtime:** 1-2 minutes
-
-**Resume capability:** If interrupted, run the same command to resume from where it stopped.
-
-### Step 3: Train Neural Models
-
-Train LSTM and TCN models for each instrument:
-
-```bash
-python scripts/train_neural.py
-```
-
-**Output:**
-- `outputs/models/lstm_*.pt` - Saved LSTM models
-- `outputs/models/tcn_*.pt` - Saved TCN models
-- `outputs/results/neural_results.csv` - Performance metrics
-- `outputs/progress/training_progress.json` - Progress tracker
-
-**Expected runtime:** 10-30 minutes (faster with GPU)
-
-**Resume capability:** Training is fully resumable. If interrupted, simply run the same command again.
-
-### Step 4: Detect Market Regimes
-
-Identify low, medium, and high volatility regimes:
-
-```bash
-python scripts/detect_regimes.py
-```
-
-**Output:**
-- `data/regimes/regime_labels_train.csv` - Regime labels for training data
-- `data/regimes/regime_labels_val.csv` - Regime labels for validation data
-- `data/regimes/regime_labels_test.csv` - Regime labels for test data
-- `outputs/results/regime_stats.csv` - Regime statistics
-- Console output with regime analysis and transition matrices
-
-**Expected runtime:** 2-5 minutes
-
-### Step 5: Train Mixture-of-Experts
-
-Combine all expert models using the MoE framework:
-
-```bash
-python scripts/train_moe.py
-```
-
-**Output:**
-- `outputs/models/moe_*.pt` - Saved MoE models
-- `outputs/results/moe_results.csv` - Performance metrics
-- `outputs/progress/moe_training.json` - Progress tracker
-- Console output comparing all models
-
-**Expected runtime:** 10-20 minutes
-
-**Resume capability:** Fully resumable. Interrupted training can be continued with the same command.
-
-## Advanced Usage
-
-### Resumable Training
-
-All training scripts support automatic resume functionality:
-
-```bash
-# Training is interrupted (Ctrl+C, crash, etc.)
-python scripts/train_neural.py
-# ... interrupted ...
-
-# Simply run again - automatically resumes from last completed model
-python scripts/train_neural.py
-```
-
-### Check Training Progress
-
-View current training status without starting new training:
-
-```bash
-# Check HAR-RV progress
-python scripts/train_baseline.py --status
-
-# Check neural models progress
-python scripts/train_neural.py --status
-
-# Check MoE progress
-python scripts/train_moe.py --status
-```
-
-**Example output:**
-```
-Training Progress:
-
-LSTM:
-  Completed: 3
-    INDX.CAC: RMSE=0.000623
-    INDX.SPX: RMSE=0.000701
-    INDX.TPX: RMSE=0.000689
-  In Progress: INDX.UKX
-  Failed: 0
-
-TCN:
-  Completed: 2
-    INDX.CAC: RMSE=0.000612
-    INDX.SPX: RMSE=0.000689
-```
-
-### Fresh Start
-
-Ignore previous progress and start training from scratch:
-
-```bash
-python scripts/train_baseline.py --fresh
-python scripts/train_neural.py --fresh
-python scripts/train_moe.py --fresh
-```
-
-### Train Specific Instruments
-
-Train only selected instruments instead of all:
-
-```bash
-# Train only S&P 500 and CAC 40
-python scripts/train_baseline.py --instruments INDX.SPX,INDX.CAC
-python scripts/train_neural.py --instruments INDX.SPX,INDX.CAC
-python scripts/train_moe.py --instruments INDX.SPX,INDX.CAC
-```
-
-### Train Specific Models
-
-For neural models, train only LSTM or TCN:
-
-```bash
-# Train only LSTM
-python scripts/train_neural.py --models lstm
-
-# Train only TCN
-python scripts/train_neural.py --models tcn
-```
-
-### Combined Options
-
-Combine multiple options:
-
-```bash
-# Fresh LSTM training for specific instruments
-python scripts/train_neural.py --fresh --models lstm --instruments INDX.SPX,INDX.CAC
-
-## Results
-
-After running all scripts, you can compare model performance:
-
-```bash
-# View all results
-cat outputs/results/baseline_results.csv
-cat outputs/results/neural_results.csv
-cat outputs/results/moe_results.csv
-```
-
-Expected performance (validation RMSE):
-- HAR-RV: ~0.000655
-- LSTM: ~0.000620
-- TCN: ~0.000610
-- MoE: ~0.000590 (best)
+The core contribution of this project is the demonstration that fixed, regime-conditioned ensembles often outperform complex learned gating networks in low signal-to-noise financial environments. The framework utilizes Hidden Markov Models (HMM) to detect latent volatility regimes and dynamically adjusts expert weights accordingly.
 
 ## Project Structure
 
+The repository is organized as follows:
+
+```text
+.
+├── config/             # Hyperparameter and system configuration
+├── data/               # Data storage (raw, processed, and regime artifacts)
+├── outputs/            # Model checkpoints, figures, and evaluation results
+├── scripts/            # Executable scripts for training and evaluation
+│   ├── analysis/       # Post-hoc analysis (ablation, plotting, DM tests)
+│   ├── data/           # ETL and regime detection pipelines
+│   ├── testing/        # Inference and ensemble evaluation
+│   └── training/       # Training loops for individual experts
+├── src/                # Core library code
+│   ├── data/           # Dataset classes and feature engineering
+│   ├── evaluation/     # Metrics (QLIKE, RMSE) and calibration
+│   ├── models/         # Model architectures (LSTM, TCN, MoE, Wrappers)
+│   └── regimes/        # Clustering logic (HMM, K-Means)
+├── pyproject.toml      # Project dependencies and metadata
+└── uv.lock             # Dependency lockfile
 ```
-volatility-forecasting/
-├── config/
-│   └── config.yaml              # Configuration parameters
-├── data/
-│   ├── raw/                     # Raw data files
-│   ├── processed/               # Processed train/val/test data
-│   └── regimes/                 # Regime labels
-├── src/
-│   ├── data/                    # Data loading and preprocessing
-│   ├── models/                  # Model implementations
-│   ├── regimes/                 # Regime detection
-│   ├── training/                # Training utilities
-│   ├── evaluation/              # Metrics and evaluation
-│   └── visualization/           # Plotting utilities
-├── scripts/                     # Executable scripts
-├── outputs/
-│   ├── models/                  # Saved model checkpoints
-│   ├── results/                 # Performance metrics
-│   └── figures/                 # Generated plots
-├── requirements.txt             # Python dependencies
-└── README.md                    # This file
+
+## Installation and Prerequisites
+
+This project relies on `uv` for dependency management and environment resolution.
+
+Ensure `uv` is installed, then sync the dependencies:
+```bash
+source .venv/bin/activate
+uv sync
+```
+
+## Data and Artifacts
+
+To ensure reproducibility without retraining all models from scratch, we provide compressed archives containing the processed datasets and precomputed model outputs.
+
+1.  **Extract Data:**
+    ```bash
+    tar -xzvf data.tar.gz
+    ```
+    This populates `data/processed/` with Parquet files and `data/regimes/` with trained HMM detectors.
+
+2.  **Extract Outputs (Optional):**
+    ```bash
+    tar -xzvf outputs.tar.gz
+    ```
+    This populates `outputs/models/` with trained weights and `outputs/predictions/` with inference results from Foundation Models (Chronos/TimesFM), which are computationally expensive to regenerate.
+
+## Usage and Replication Pipeline
+
+The workflow is modular. Users can run the entire pipeline or specific stages using the scripts provided in the `scripts/` directory. Configuration for all stages is managed via `config/config.yaml`.
+
+### 1. Data Preparation and Feature Engineering
+If starting from raw data, generate the processed feature sets (Realized Volatility, Quarticity, Lags):
+
+```bash
+python scripts/data/prepare_data.py
+```
+
+### 2. Regime Detection
+Fit Hidden Markov Models to segment market conditions into discrete regimes (e.g., Low, Medium, High Volatility):
+
+```bash
+python scripts/data/detect_regimes.py
+```
+
+### 3. Expert Training
+Train the individual experts. Foundation models (Chronos/TimesFM) operate in a zero-shot or fine-tuned inference mode and save predictions to disk to be used as "Precomputed Experts" by the MoE.
+
+**Baselines and Neural Models:**
+```bash
+python scripts/training/train_baseline.py  # HAR-RV
+python scripts/training/train_neural.py    # LSTM and TCN
+```
+
+**Foundation Models (GPU Recommended):**
+```bash
+python scripts/training/train_chronos_fintext.py
+python scripts/training/train_timesfm_fintext.py
+```
+
+### 4. Ensemble Evaluation
+Evaluate the Regime-Aware MoE against baselines. This script loads the trained experts and the HMM detectors, applies the weighting logic defined in `config.yaml`, and computes metrics (RMSE, MAE, QLIKE, Diebold-Mariano statistics).
+
+```bash
+python scripts/testing/evaluate_ensemble.py
+```
+
+### 5. Analysis and Reporting
+Generate performance plots, error heatmaps, and ablation studies:
+
+```bash
+python scripts/analysis/plot_performance.py
+python scripts/analysis/regime_performance.py
+python scripts/analysis/diebold_mariano.py
 ```
 
 ## Configuration
 
-Edit `config/config.yaml` to customize:
+The system behavior is controlled by `config/config.yaml`. Key sections include:
 
-- **Data paths**: Location of raw and processed data
-- **Instruments**: Which futures to analyze
-- **Train/val/test splits**: Date ranges for each split
-- **Model hyperparameters**: Hidden sizes, learning rates, etc.
-- **Regime detection**: Number of regimes, HMM vs k-means
-- **MoE settings**: Expert selection, gating network architecture
+*   **`data`**: Input paths and date splits for Train/Val/Test.
+*   **`models`**: Hyperparameters for LSTM, TCN, and HAR-RV.
+*   **`regimes`**: HMM configuration (number of components, covariance type) and input features for clustering.
+*   **`ensemble`**:
+    *   `experts`: List of active experts.
+    *   `regime_weights`: The fixed weighting matrix determining expert influence per regime.
 
-## Key Features
+## Methodology Notes
 
-- **Realized Volatility Computation**: Daily, weekly, and monthly RV from 5-minute returns
-- **HAR-RV Model**: Heterogeneous Autoregressive model with multiple horizons
-- **LSTM**: Recurrent neural network for sequence modeling
-- **TCN**: Temporal Convolutional Network with dilated convolutions
-- **HMM Regime Detection**: Identifies latent market states
-- **Mixture-of-Experts**: Adaptive model selection based on market regime
-- **Comprehensive Evaluation**: RMSE, MAE, QLIKE metrics with statistical tests
+*   **Regime Detection**: We utilize Gaussian HMMs on realized volatility and volume features to identify latent market states.
+*   **Foundation Models**: To integrate Large Language Models (LLMs) adapted for time series, we treat Chronos and TimesFM as "Precomputed Experts." Their inference is run offline, aligned by timestamp, and fed into the MoE during the forward pass.
+*   **Evaluation**: Primary evaluation metrics include Root Mean Squared Error (RMSE) and Quasi-Likelihood (QLIKE), the latter being robust to noise in the volatility proxy.
 
-## Data Format
+## References
 
-Expected input data format (parquet file):
-
-```
-timestamp (int64): Microsecond timestamp
-Future (str): Instrument identifier (e.g., "INDX.SPX")
-last (float64): Last traded price
-volume (float64): Trading volume
-```
-
-## Model Details
-
-### HAR-RV
-- Linear regression with RV_daily, RV_weekly, RV_monthly features
-- Fast training, interpretable coefficients
-- Strong baseline performance
-
-### LSTM
-- 2-layer LSTM with 64 hidden units
-- Sequence length: 20 timesteps
-- Dropout: 0.2
-
-### TCN
-- 3 temporal blocks: [32, 64, 128] channels
-- Kernel size: 3
-- Dilated causal convolutions
-
-### MoE
-- Gating network: 2-layer MLP (hidden size 32)
-- Combines HAR-RV, LSTM, TCN predictions
-- Regime-supervised or end-to-end learning
+1.  Corsi, F. (2009). A Simple Approximate Long-Memory Model of Realized Volatility. *Journal of Financial Econometrics*.
+2.  Ansari, A., et al. (2024). Chronos: Pretrained Models for Probabilistic Time Series Forecasting.
+3.  Das, A., et al. (2024). A Decoder-only Foundation Model for Time-series Forecasting (TimesFM).
