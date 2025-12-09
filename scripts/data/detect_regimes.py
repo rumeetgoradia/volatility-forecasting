@@ -22,6 +22,11 @@ def load_data(config: dict):
     val_df = pd.read_parquet(data_path / "val.parquet")
     test_df = pd.read_parquet(data_path / "test.parquet")
 
+    for df in (train_df, val_df, test_df):
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        if df["datetime"].dt.tz is not None:
+            df["datetime"] = df["datetime"].dt.tz_localize(None)
+
     minute_mark = config["target"].get("hourly_minute")
     assert_hourly_downsampled(
         [("train", train_df), ("val", val_df), ("test", test_df)],

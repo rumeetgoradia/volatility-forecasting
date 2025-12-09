@@ -262,6 +262,17 @@ def main():
     print("\nComparison with Baselines")
     baseline_file = results_path / "baseline_results_scaled.csv"
     neural_file = results_path / "neural_results.csv"
+    timesfm_file = results_path / "timesfm_fintext_results.csv"
+
+    cfg_timesfm = config.get("timesfm_fintext", {})
+    ft_suffix = cfg_timesfm.get("finetune_output_suffix") or cfg_timesfm.get("finetune_mode", "")
+    ft_suffix = str(ft_suffix).strip().replace(" ", "_")
+    finetune_results_name = (
+        f"timesfm_fintext_finetune_results_{ft_suffix}.csv"
+        if ft_suffix
+        else "timesfm_fintext_finetune_results.csv"
+    )
+    finetune_file = results_path / finetune_results_name
 
     if baseline_file.exists():
         df = pd.read_csv(baseline_file)
@@ -276,6 +287,16 @@ def main():
         tcn_df = df[df["model"] == "TCN"]
         if len(tcn_df) > 0:
             print(f"TCN       : {tcn_df['val_rmse'].mean():.6f}")
+
+    if timesfm_file.exists():
+        df = pd.read_csv(timesfm_file)
+        print(f"TimesFM   : {df['val_rmse'].mean():.6f}")
+
+    if finetune_file.exists():
+        df = pd.read_csv(finetune_file)
+        val_rmse_cols = [c for c in df.columns if "val_rmse" in c]
+        val_rmse = df[val_rmse_cols[0]].mean() if val_rmse_cols else df["val_rmse"].mean()
+        print(f"TimesFM FT: {val_rmse:.6f}")
 
     print(f"Ensemble  : {val_results['rmse'].mean():.6f}")
 

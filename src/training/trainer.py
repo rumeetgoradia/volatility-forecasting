@@ -124,7 +124,11 @@ class Trainer:
                     if self._check_for_nans(outputs, batch_idx, "train"):
                         continue
 
-                    pred_loss = self.criterion(outputs, y_batch)
+                    # Log-space objective: compare log(pred) to log(target)
+                    eps = 1e-8
+                    log_pred = torch.log(outputs + eps)
+                    log_target = torch.log(y_batch + eps)
+                    pred_loss = self.criterion(log_pred, log_target)
                     regime_loss = F.cross_entropy(
                         regime_logits[valid_mask], regime_tensor[valid_mask]
                     )
@@ -140,13 +144,19 @@ class Trainer:
                     outputs = self._forward_model(X_batch, timestamps=timestamps, regime=regime)
                     if self._check_for_nans(outputs, batch_idx, "train"):
                         continue
-                    loss = self.criterion(outputs, y_batch)
+                    eps = 1e-8
+                    log_pred = torch.log(outputs + eps)
+                    log_target = torch.log(y_batch + eps)
+                    loss = self.criterion(log_pred, log_target)
                     pred_loss = loss
             else:
                 outputs = self._forward_model(X_batch)
                 if self._check_for_nans(outputs, batch_idx, "train"):
                     continue
-                loss = self.criterion(outputs, y_batch)
+                eps = 1e-8
+                log_pred = torch.log(outputs + eps)
+                log_target = torch.log(y_batch + eps)
+                loss = self.criterion(log_pred, log_target)
                 pred_loss = loss
 
             if torch.isnan(loss) or torch.isinf(loss):
@@ -232,7 +242,11 @@ class Trainer:
                         if self._check_for_nans(outputs, batch_idx, "val"):
                             continue
 
-                        pred_loss = self.criterion(outputs, y_batch)
+                        # Log-space objective for validation as well
+                        eps = 1e-8
+                        log_pred = torch.log(outputs + eps)
+                        log_target = torch.log(y_batch + eps)
+                        pred_loss = self.criterion(log_pred, log_target)
                         regime_loss = F.cross_entropy(
                             regime_logits[valid_mask], regime_tensor[valid_mask]
                         )
@@ -253,13 +267,19 @@ class Trainer:
                         )
                         if self._check_for_nans(outputs, batch_idx, "val"):
                             continue
-                        loss = self.criterion(outputs, y_batch)
+                        eps = 1e-8
+                        log_pred = torch.log(outputs + eps)
+                        log_target = torch.log(y_batch + eps)
+                        loss = self.criterion(log_pred, log_target)
                         pred_loss = loss
                 else:
                     outputs = self._forward_model(X_batch)
                     if self._check_for_nans(outputs, batch_idx, "val"):
                         continue
-                    loss = self.criterion(outputs, y_batch)
+                    eps = 1e-8
+                    log_pred = torch.log(outputs + eps)
+                    log_target = torch.log(y_batch + eps)
+                    loss = self.criterion(log_pred, log_target)
                     pred_loss = loss
 
                 if torch.isnan(loss) or torch.isinf(loss):

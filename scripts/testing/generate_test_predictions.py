@@ -13,6 +13,7 @@ from models.lstm import LSTMModel
 from models.tcn import TCNModel
 from models.moe import load_expert_models
 from models.gating import RegimeAwareFixedGating
+from models.precomputed_expert import PrecomputedExpert
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -26,6 +27,7 @@ def clean_datetime(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df["datetime"].notna()].copy()
 
     if df["datetime"].dt.tz is not None:
+        # Drop timezone to align on wall-clock times used in precomputed predictions
         df["datetime"] = df["datetime"].dt.tz_localize(None)
 
     min_date = pd.Timestamp('1990-01-01')
@@ -115,7 +117,17 @@ def generate_predictions_for_instrument(
 
             for name in expert_names:
                 expert = expert_models[name]
-                if name in ('chronos_fintext', 'timesfm_fintext'):
+                ts_iter = None
+                if isinstance(timestamps, dict):
+                    ts_iter = timestamps.get("datetime_obj") or timestamps.get("datetime")
+                else:
+                    ts_iter = timestamps
+
+                if isinstance(expert, PrecomputedExpert):
+                    if ts_iter is None:
+                        raise ValueError("PrecomputedExpert requires timestamp list")
+                    expert_output = expert(X_batch, timestamps=ts_iter)
+                elif name in ('chronos_fintext', 'timesfm_fintext', 'timesfm_fintext_finetune'):
                     expert_output = expert(X_batch, timestamps=timestamps)
                 else:
                     expert_output = expert(X_batch)
@@ -152,7 +164,9 @@ def main():
 
     test_df = pd.read_parquet("data/processed/test.parquet")
     test_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    test_df["datetime"] = pd.to_datetime(test_df["datetime"], errors='coerce').dt.tz_localize(None)
+    test_df["datetime"] = pd.to_datetime(test_df["datetime"], errors='coerce')
+    if test_df["datetime"].dt.tz is not None:
+        test_df["datetime"] = test_df["datetime"].dt.tz_localize(None)
 
     test_regimes = pd.read_csv("data/regimes/regime_labels_test.csv")
     test_regimes["datetime"] = pd.to_datetime(test_regimes["datetime"], utc=True).dt.tz_localize(None)
@@ -183,6 +197,13 @@ def main():
         return
 
     combined = pd.concat(all_predictions, ignore_index=True)
+
+    # If HAR-RV is one-step ahead, shift its predictions back by one per instrument to align with targets
+    if "pred_har_rv" in combined.columns:
+        combined["pred_har_rv"] = (
+            combined.groupby("instrument")["pred_har_rv"].shift(-1)
+        )
+        combined = combined.dropna(subset=["pred_har_rv"])
 
     output_dir = Path("outputs/test_predictions")
     output_dir.mkdir(parents=True, exist_ok=True)

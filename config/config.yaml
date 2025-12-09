@@ -75,28 +75,24 @@ ensemble:
     - "har_rv"
     - "lstm"
     - "tcn"
-    - "chronos_fintext"
-    - "timesfm_fintext"
+    - "timesfm_fintext_finetune"
 
   regime_weights:
     0:
-      har_rv: 0.50
-      lstm: 0.20
+      har_rv: 0.55
+      lstm: 0.25
       tcn: 0.15
-      chronos_fintext: 0.10
-      timesfm_fintext: 0.05
+      timesfm_fintext_finetune: 0.05
     1:
-      har_rv: 0.35
+      har_rv: 0.50
       lstm: 0.30
-      tcn: 0.20
-      chronos_fintext: 0.10
-      timesfm_fintext: 0.05
+      tcn: 0.15
+      timesfm_fintext_finetune: 0.05
     2:
-      har_rv: 0.15
-      lstm: 0.40
-      tcn: 0.30
-      chronos_fintext: 0.10
-      timesfm_fintext: 0.05
+      har_rv: 0.20
+      lstm: 0.45
+      tcn: 0.25
+      timesfm_fintext_finetune: 0.10
 
 target:
   bar_minutes: 5
@@ -110,7 +106,7 @@ chronos_fintext:
   bar_minutes: 5
   context_bars: 336
   prediction_length: 1
-  input_series: "RV_H1"
+  input_series: "RV_1H"
   input_representation: "rv"
   pred_floor: 0.0001
   num_samples: 50
@@ -123,17 +119,31 @@ timesfm_fintext:
   model_id: "FinText/TimesFM_8M_2018_Global"
   bar_minutes: 5
   context_bars: 120
-  prediction_length: 12
+  prediction_length: 1
   frequency_id: 0
-  input_series: "RV_H1"
+  input_series: "RV_1H"
   input_representation: "rv"
   pred_floor: 0.0001
-  dyn_floor_factor: 0.1
+  dyn_floor_factor: 0.0
   log_scale: true
-  calibrate: true
+  calibrate: false
   truncate_negative: false
   device_map: "auto"
   torch_dtype: "auto"
   progress_file: "outputs/progress/timesfm_fintext_training.json"
+  progress_file_finetune: "outputs/progress/timesfm_fintext_finetune_progress.json"
+
+  # Fine-tune options
+  finetune_mode: "linear_probe" # "full"
+  finetune_epochs: 10
+  finetune_batch_size: 32
+  finetune_lr: 0.0001
+  finetune_min_lr: 0.0001
+  finetune_weight_decay: 0.01
+  finetune_max_grad_norm: 1.0
+  finetune_ema_decay: 1.0
+  finetune_internal_val_frac: 0.0
+  finetune_early_stopping_patience: 5
+  finetune_output_suffix: "linear_probe"  # optional suffix for predictions/results/progress; defaults to finetune_mode when null
 
 random_seed: 42

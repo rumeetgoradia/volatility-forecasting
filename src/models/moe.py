@@ -46,12 +46,22 @@ class MixtureOfExperts(nn.Module):
         else:
             weights = self.gating(gating_input)
 
+        ts_iter = None
+        if isinstance(timestamps, dict):
+            ts_iter = timestamps.get("datetime_obj") or timestamps.get("datetime")
+        elif timestamps is not None:
+            ts_iter = timestamps
+
         expert_outputs = []
         for name in self.expert_names:
             expert = self.experts[name]
 
             with torch.no_grad():
-                if name in ("chronos_fintext", "timesfm_fintext"):
+                if isinstance(expert, PrecomputedExpert):
+                    if ts_iter is None:
+                        raise ValueError("PrecomputedExpert requires timestamps to align predictions.")
+                    expert_output = expert(x, timestamps=ts_iter)
+                elif name in ("chronos_fintext", "timesfm_fintext"):
                     output = expert(x, timestamps=timestamps)
                 else:
                     output = expert(x)
@@ -112,55 +122,93 @@ def load_expert_models(
             elif expert_name == "lstm":
                 model_path = models_dir / f"lstm_{instrument}.pt"
                 if model_path.exists():
-                    model = LSTMModel(
-                        input_size=input_size,
-                        hidden_size=config["models"]["lstm"]["hidden_size"],
-                        num_layers=config["models"]["lstm"]["num_layers"],
-                        dropout=config["models"]["lstm"]["dropout"],
-                        target_mean=target_mean,
-                    )
-                    model.load_state_dict(torch.load(model_path, map_location=device))
-                    model.to(device)
-                    model.eval()
-                    instrument_experts["lstm"] = model
+                    try:
+                        model = LSTMModel(
+                            input_size=input_size,
+                            hidden_size=config["models"]["lstm"]["hidden_size"],
+                            num_layers=config["models"]["lstm"]["num_layers"],
+                            dropout=config["models"]["lstm"]["dropout"],
+                            target_mean=target_mean,
+                        )
+                        model.load_state_dict(torch.load(model_path, map_location=device))
+                        model.to(device)
+                        model.eval()
+                        instrument_experts["lstm"] = model
+                    except Exception as e:
+                        print(f"Skipping LSTM for {instrument}: {e}")
 
             elif expert_name == "tcn":
                 model_path = models_dir / f"tcn_{instrument}.pt"
                 if model_path.exists():
-                    model = TCNModel(
-                        input_size=input_size,
-                        hidden_channels=64,
-                        num_layers=3,
-                        kernel_size=config["models"]["tcn"]["kernel_size"],
-                        dropout=config["models"]["tcn"]["dropout"],
-                        target_mean=target_mean,
-                    )
-                    model.load_state_dict(torch.load(model_path, map_location=device))
-                    model.to(device)
-                    model.eval()
-                    instrument_experts["tcn"] = model
+                    try:
+                        model = TCNModel(
+                            input_size=input_size,
+                            hidden_channels=64,
+                            num_layers=3,
+                            kernel_size=config["models"]["tcn"]["kernel_size"],
+                            dropout=config["models"]["tcn"]["dropout"],
+                            target_mean=target_mean,
+                        )
+                        model.load_state_dict(torch.load(model_path, map_location=device))
+                        model.to(device)
+                        model.eval()
+                        instrument_experts["tcn"] = model
+                    except Exception as e:
+                        print(f"Skipping TCN for {instrument}: {e}")
 
             elif expert_name == "rf":
                 model_path = models_dir / f"rf_{instrument}.pkl"
                 if model_path.exists():
-                    saved = joblib.load(model_path)
-                    rf_model = saved.get("model", saved)
-                    feature_indices = saved.get("feature_indices")
-                    instrument_experts["rf"] = RandomForestWrapper(
-                        rf_model, feature_indices=feature_indices
-                    )
+                    try:
+                        saved = joblib.load(model_path)
+                        rf_model = saved.get("model", saved)
+                        feature_indices = saved.get("feature_indices")
+                        instrument_experts["rf"] = RandomForestWrapper(
+                            rf_model, feature_indices=feature_indices
+                        )
+                    except Exception as e:
+                        print(f"Skipping RF for {instrument}: {e}")
 
-            elif expert_name in ("chronos_fintext", "timesfm_fintext"):
+            elif expert_name in (
+                "chronos_fintext",
+                "timesfm_fintext",
+                "timesfm_fintext_finetune",
+            ):
                 pred_dir = Path("outputs/predictions")
-                pred_file = pred_dir / f"{expert_name}_{instrument}.csv"
-                if pred_file.exists():
+                tcfg = config.get("timesfm_fintext", {})
+                raw_suffix = tcfg.get("finetune_output_suffix")
+                if raw_suffix is None:
+                    raw_suffix = tcfg.get("finetune_mode", "")
+                suffix = str(raw_suffix).strip().replace(" ", "_") if raw_suffix is not None else ""
+
+                if expert_name == "timesfm_fintext_finetune":
+                    preferred_prefixes = []
+                    if suffix:
+                        preferred_prefixes.append(f"timesfm_fintext_finetune_{suffix}")
+                    preferred_prefixes.append("timesfm_fintext_finetune")
+                elif expert_name == "timesfm_fintext":
+                    preferred_prefixes = ["timesfm_fintext"]
+                else:  # chronos_fintext
+                    preferred_prefixes = ["chronos_fintext"]
+
+                pred_file = None
+                for prefix in preferred_prefixes:
+                    candidate = pred_dir / f"{prefix}_{instrument}.csv"
+                    if candidate.exists():
+                        pred_file = candidate
+                        break
+
+                if pred_file and pred_file.exists():
                     dfp = pd.read_csv(pred_file)
                     instrument_experts[expert_name] = PrecomputedExpert(
                         preds_df=dfp,
                         value_col="predicted",
-                        calibrated_col="predicted_calib",
+                        calibrated_col=None,
                         allowed_splits=None,
-                        fuzzy_match_window_minutes=1,
+                        fuzzy_match_window_minutes=0,
+                        # Default fallback should be the mean predicted value to avoid constant bias if a timestamp is missing.
+                        # We compute here to avoid per-call overhead.
+                        fallback=float(pd.to_numeric(dfp["predicted"], errors="coerce").mean()),
                     )
 
         all_experts[instrument] = instrument_experts

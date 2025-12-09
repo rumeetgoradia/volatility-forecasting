@@ -27,13 +27,11 @@ class PrecomputedExpert(nn.Module):
         df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
 
         if df["datetime"].dt.tz is not None:
-            df["datetime"] = df["datetime"].dt.tz_localize(None)
+            df["datetime"] = df["datetime"].dt.tz_convert("UTC").dt.tz_localize(None)
 
         self.datetime_to_pred = dict(zip(df["datetime"], df[target_col]))
         self.fuzzy_window = pd.Timedelta(minutes=fuzzy_match_window_minutes)
-
-        self.sorted_datetimes = sorted(self.datetime_to_pred.keys())
-
+        # For exact matching, we don't need sorted indices
         finite_vals = pd.to_numeric(df[target_col], errors="coerce")
         finite_vals = finite_vals[np.isfinite(finite_vals)]
         self.fallback = (
@@ -41,44 +39,30 @@ class PrecomputedExpert(nn.Module):
             if fallback is not None
             else (float(np.median(finite_vals)) if len(finite_vals) else 0.0)
         )
+        self.sorted_datetimes = []
+        self._sorted_array = np.array([])
 
     def _normalize_timestamp(self, ts):
         if isinstance(ts, pd.Timestamp):
             ts_dt = ts
         elif isinstance(ts, np.datetime64):
             ts_dt = pd.Timestamp(ts)
-        elif isinstance(ts, (int, np.integer)):
-            ts_dt = pd.Timestamp(ts, unit="ns")
         else:
             ts_dt = pd.to_datetime(ts, errors="coerce")
 
         if pd.isna(ts_dt):
             return None
 
-        if ts_dt.tzinfo is not None:
+        if getattr(ts_dt, "tzinfo", None) is not None:
             ts_dt = ts_dt.tz_localize(None)
 
         return ts_dt
 
-    def _fuzzy_lookup(self, ts_dt):
-        if not self.sorted_datetimes:
-            return None
-
-        min_diff = timedelta.max
-        closest_dt = None
-
-        for dt in self.sorted_datetimes:
-            diff = abs(dt - ts_dt)
-            if diff < min_diff:
-                min_diff = diff
-                closest_dt = dt
-            if diff > self.fuzzy_window:
-                break
-
-        if min_diff <= self.fuzzy_window:
-            return self.datetime_to_pred.get(closest_dt)
-
-        return None
+    def _exact_or_nearest(self, ts_dt):
+        """
+        Fast lookup: exact match only (no fuzzy search).
+        """
+        return self.datetime_to_pred.get(ts_dt)
 
     def forward(self, x: torch.Tensor, timestamps=None):
         if timestamps is None:
@@ -95,18 +79,17 @@ class PrecomputedExpert(nn.Module):
             ts_dt = self._normalize_timestamp(ts)
 
             if ts_dt is None:
-                preds.append(self.fallback)
-                continue
+                raise ValueError(f"Timestamp could not be normalized: {ts!r} (type: {type(ts)})")
 
             pred_val = self.datetime_to_pred.get(ts_dt)
 
             if pred_val is None:
-                pred_val = self._fuzzy_lookup(ts_dt)
+                raise KeyError(f"Missing prediction for timestamp {ts_dt} (normalized from {ts!r}, type {type(ts)}) in precomputed expert")
 
             if pred_val is not None:
                 preds.append(float(pred_val))
             else:
-                preds.append(self.fallback)
+                raise RuntimeError(f"Unexpected None prediction for timestamp {ts_dt}")
 
         pred_tensor = torch.tensor(
             preds, device=x.device, dtype=torch.float32

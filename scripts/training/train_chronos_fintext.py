@@ -28,6 +28,9 @@ def load_data(config: dict):
 
     for df, split in ((train_df, "train"), (val_df, "val"), (test_df, "test")):
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        if df["datetime"].dt.tz is not None:
+            df["datetime"] = df["datetime"].dt.tz_localize(None)
         df["split"] = split
 
     minute_mark = config["target"].get("hourly_minute")
@@ -85,6 +88,7 @@ def rolling_forecast(
     pred_floor: float = 1e-6,
     num_samples: int = 20,
     reduce: str = "median",
+    scale_factor: float = 1.0,
     splits=("val", "test"),
 ):
     if len(instrument_df) <= context_bars:
@@ -154,10 +158,10 @@ def rolling_forecast(
             forecast_h = forecast_agg[:prediction_length]
 
             if input_representation == "variance":
-                forecast_var = float(np.sum(forecast_h))
+                forecast_var = float(np.sum(forecast_h) * float(scale_factor))
                 pred_rv = float(np.sqrt(max(forecast_var, 0.0)))
             elif input_representation == "rv":
-                pred_rv = float(np.mean(forecast_h))
+                pred_rv = float(np.mean(forecast_h) * float(scale_factor))
             else:
                 raise ValueError(
                     f"Unknown input_representation: {input_representation}"
@@ -198,19 +202,44 @@ def train_fintext_for_instrument(instrument: str, panel: pd.DataFrame, config: d
     if inst_df.empty:
         raise ValueError(f"No data found for instrument {instrument}")
 
-    series_col = cfg.get("input_series") or target_cfg.get("target_col", "RV_1H")
+    series_choice = cfg.get("input_series")
     series_values = None
 
-    if series_col not in inst_df.columns:
-        series_col = target_cfg.get("target_col", "RV_1H")
-
-    if series_col not in inst_df.columns and "log_returns" in inst_df.columns:
+    if series_choice == "log_returns_sq":
+        if "log_returns" not in inst_df.columns:
+            raise ValueError(
+                f"log_returns column not found but input_series=log_returns_sq for {instrument}"
+            )
         series_col = "log_returns_sq"
-        series_values = (inst_df["log_returns"].astype(float) ** 2).values
+        raw_series = (inst_df["log_returns"].astype(float) ** 2).values
+    elif series_choice is not None:
+        if series_choice not in inst_df.columns:
+            raise ValueError(
+                f"Configured input_series '{series_choice}' not in data for {instrument}"
+            )
+        series_col = series_choice
+        raw_series = inst_df[series_col].astype(float).values
+    else:
+        series_col = target_cfg.get("target_col", "RV_1H")
+        if series_col not in inst_df.columns:
+            raise ValueError(
+                f"Default series column '{series_col}' not found for {instrument}"
+            )
+        raw_series = inst_df[series_col].astype(float).values
 
     input_representation = cfg.get("input_representation", "rv")
     if series_col in ("log_returns_sq", "log_returns"):
         input_representation = "variance"
+
+    train_mask = inst_df["split"] == "train"
+    train_series = raw_series[train_mask.to_numpy()]
+    train_series = train_series[np.isfinite(train_series) & (train_series > 0)]
+    scale = float(train_series.mean()) if len(train_series) > 0 else 1.0
+    if not np.isfinite(scale) or scale <= 0:
+        scale = 1.0
+    series_scale = scale ** 2 if input_representation == "variance" else scale
+    series_scale = series_scale if np.isfinite(series_scale) and series_scale > 0 else 1.0
+    series_values = raw_series / series_scale
 
     pred_floor = float(cfg.get("pred_floor", 1e-6))
     dyn_floor_factor = float(cfg.get("dyn_floor_factor", 0.1))
@@ -236,6 +265,7 @@ def train_fintext_for_instrument(instrument: str, panel: pd.DataFrame, config: d
         pred_floor=pred_floor,
         num_samples=cfg.get("num_samples", 20),
         reduce=cfg.get("reduce", "median"),
+        scale_factor=series_scale,
         splits=("val", "test"),
     )
 

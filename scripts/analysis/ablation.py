@@ -218,8 +218,8 @@ def ablation_expert_count(
     expert_combinations = [
         (["har_rv", "lstm"], "2 experts (HAR-RV + LSTM)"),
         (["har_rv", "lstm", "tcn"], "3 experts (+ TCN)"),
-        (["har_rv", "lstm", "tcn", "chronos_fintext"], "4 experts (+ Chronos)"),
-        (all_experts, "5 experts (+ TimesFM)"),
+        (["har_rv", "lstm", "tcn", "timesfm_fintext_finetune"], "4 experts (+ TimesFM FT)"),
+        (all_experts, f"{len(all_experts)} experts (full)"),
     ]
 
     for expert_subset, name in expert_combinations:
@@ -319,8 +319,7 @@ def ablation_weight_configurations(
                 "har_rv": 0.6,
                 "lstm": 0.2,
                 "tcn": 0.1,
-                "chronos_fintext": 0.05,
-                "timesfm_fintext": 0.05,
+                "timesfm_fintext_finetune": 0.1,
             },
         ),
         (
@@ -329,8 +328,7 @@ def ablation_weight_configurations(
                 "har_rv": 0.1,
                 "lstm": 0.6,
                 "tcn": 0.2,
-                "chronos_fintext": 0.05,
-                "timesfm_fintext": 0.05,
+                "timesfm_fintext_finetune": 0.1,
             },
         ),
         (
@@ -339,8 +337,7 @@ def ablation_weight_configurations(
                 "har_rv": 0.2,
                 "lstm": 0.4,
                 "tcn": 0.3,
-                "chronos_fintext": 0.05,
-                "timesfm_fintext": 0.05,
+                "timesfm_fintext_finetune": 0.1,
             },
         ),
     ]

@@ -26,6 +26,9 @@ def main():
     print("Loading data")
     loader = DataLoader(config["data"]["raw_path"])
     df = loader.load(instruments=config["data"]["instruments"])
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+    if df["datetime"].dt.tz is not None:
+        df["datetime"] = df["datetime"].dt.tz_localize(None)
     print(f"Loaded {len(df):,} records")
     print(f"Instruments: {loader.get_instruments_list()}")
 

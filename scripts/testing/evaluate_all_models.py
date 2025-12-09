@@ -163,6 +163,16 @@ def main():
     overall = evaluate_overall_performance(df)
     print_results_table(overall, "Test Set Performance - All Instruments")
 
+    # TimesFM summaries if present
+    tfm_rows = overall[overall["model"] == "timesfm_fintext"]
+    tfm_ft_rows = overall[overall["model"] == "timesfm_fintext_finetune"]
+    if len(tfm_rows) > 0 or len(tfm_ft_rows) > 0:
+        print("\nTimesFM Summary")
+        if len(tfm_rows) > 0:
+            print(f"  TimesFM base      RMSE={tfm_rows['rmse'].iloc[0]:.6f}, R2={tfm_rows['r2'].iloc[0]:.4f}")
+        if len(tfm_ft_rows) > 0:
+            print(f"  TimesFM finetune  RMSE={tfm_ft_rows['rmse'].iloc[0]:.6f}, R2={tfm_ft_rows['r2'].iloc[0]:.4f}")
+
     print("\n2. Per-Instrument Performance")
     per_inst = evaluate_per_instrument(df)
 

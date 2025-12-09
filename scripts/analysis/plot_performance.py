@@ -17,6 +17,9 @@ def plot_overall_performance(df: pd.DataFrame, output_dir: Path):
 
     pred_cols = [col for col in df.columns if col.startswith("pred_")]
 
+    # Drop base TimesFM if present; keep finetune and other models
+    pred_cols = [c for c in pred_cols if c != "pred_timesfm_fintext"]
+
     results = []
     for col in pred_cols:
         model = col.replace("pred_", "")
