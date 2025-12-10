@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,10 +8,8 @@ sys.path.append("src")
 from evaluation.metrics import compute_all_metrics
 
 
-def load_test_predictions(
-    pred_file: str = "outputs/test_predictions/all_models_test_predictions.csv",
-):
-    """Load the unified test predictions file."""
+def load_predictions(pred_file: str):
+    """Load the unified predictions file."""
     df = (
         pd.read_parquet(pred_file)
         if pred_file.endswith(".parquet")
@@ -141,17 +140,22 @@ def print_results_table(df: pd.DataFrame, title: str):
 
 
 def main():
-    print("COMPREHENSIVE MODEL EVALUATION ON TEST SET")
+    parser = argparse.ArgumentParser(description="Comprehensive model evaluation on a split")
+    parser.add_argument("--split", type=str, default="test", choices=["val", "test"], help="Split to evaluate")
+    args = parser.parse_args()
 
-    pred_file = "outputs/test_predictions/all_models_test_predictions.csv"
+    split_name = args.split.lower()
+    print(f"COMPREHENSIVE MODEL EVALUATION ON {split_name.upper()} SET")
+
+    pred_file = f"outputs/test_predictions/all_models_{split_name}_predictions.csv"
 
     if not Path(pred_file).exists():
         print(f"Predictions file not found: {pred_file}")
-        print("Run: python scripts/testing/generate_test_predictions.py")
+        print(f"Run: python scripts/testing/generate_test_predictions.py --split {split_name}")
         sys.exit(1)
 
     print(f"Loading predictions from {pred_file}")
-    df = load_test_predictions(pred_file)
+    df = load_predictions(pred_file)
 
     print(f"Loaded {len(df)} predictions")
     print(f"Instruments: {df['instrument'].nunique()}")
@@ -161,17 +165,17 @@ def main():
 
     print("\n1. Overall Performance")
     overall = evaluate_overall_performance(df)
-    print_results_table(overall, "Test Set Performance - All Instruments")
+    print_results_table(overall, f"{split_name.title()} Set Performance - All Instruments")
 
     # TimesFM summaries if present
     tfm_rows = overall[overall["model"] == "timesfm_fintext"]
-    tfm_ft_rows = overall[overall["model"] == "timesfm_fintext_finetune"]
+    tfm_ft_rows = overall[overall["model"].str.startswith("timesfm_fintext_finetune")]
     if len(tfm_rows) > 0 or len(tfm_ft_rows) > 0:
         print("\nTimesFM Summary")
         if len(tfm_rows) > 0:
-            print(f"  TimesFM base      RMSE={tfm_rows['rmse'].iloc[0]:.6f}, R2={tfm_rows['r2'].iloc[0]:.4f}")
-        if len(tfm_ft_rows) > 0:
-            print(f"  TimesFM finetune  RMSE={tfm_ft_rows['rmse'].iloc[0]:.6f}, R2={tfm_ft_rows['r2'].iloc[0]:.4f}")
+            print(f"  TimesFM base               RMSE={tfm_rows['rmse'].iloc[0]:.6f}, R2={tfm_rows['r2'].iloc[0]:.4f}")
+        for _, row in tfm_ft_rows.iterrows():
+            print(f"  TimesFM finetune ({row['model']})  RMSE={row['rmse']:.6f}, R2={row['r2']:.4f}")
 
     print("\n2. Per-Instrument Performance")
     per_inst = evaluate_per_instrument(df)
@@ -202,10 +206,10 @@ def main():
     results_dir = Path("outputs/results")
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    overall.to_csv(results_dir / "test_overall_performance.csv", index=False)
-    per_inst.to_csv(results_dir / "test_per_instrument_performance.csv", index=False)
+    overall.to_csv(results_dir / f"{split_name}_overall_performance.csv", index=False)
+    per_inst.to_csv(results_dir / f"{split_name}_per_instrument_performance.csv", index=False)
     if len(per_regime) > 0:
-        per_regime.to_csv(results_dir / "test_per_regime_performance.csv", index=False)
+        per_regime.to_csv(results_dir / f"{split_name}_per_regime_performance.csv", index=False)
 
     print(f"\nResults saved to {results_dir}/")
 

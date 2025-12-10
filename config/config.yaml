@@ -75,24 +75,39 @@ ensemble:
     - "har_rv"
     - "lstm"
     - "tcn"
-    - "timesfm_fintext_finetune"
-
+    - "timesfm_fintext_finetune_full"
   regime_weights:
     0:
-      har_rv: 0.55
-      lstm: 0.25
-      tcn: 0.15
-      timesfm_fintext_finetune: 0.05
-    1:
-      har_rv: 0.50
-      lstm: 0.30
-      tcn: 0.15
-      timesfm_fintext_finetune: 0.05
-    2:
       har_rv: 0.20
-      lstm: 0.45
-      tcn: 0.25
-      timesfm_fintext_finetune: 0.10
+      lstm: 0.30
+      tcn: 0.30
+      timesfm_fintext_finetune_full: 0.20
+    1:
+      har_rv: 0.40
+      lstm: 0.20
+      tcn: 0.20
+      timesfm_fintext_finetune_full: 0.20
+    2:
+      har_rv: 0.30
+      lstm: 0.10
+      tcn: 0.10
+      timesfm_fintext_finetune_full: 0.50
+  # regime_weights:
+  #   0:
+  #     har_rv: 1
+  #     lstm: 0
+  #     tcn: 0
+  #     timesfm_fintext_finetune_full: 0
+  #   1:
+  #     har_rv: 1
+  #     lstm: 0
+  #     tcn: 0
+  #     timesfm_fintext_finetune_full: 0
+  #   2:
+  #     har_rv: 1
+  #     lstm: 0
+  #     tcn: 0
+  #     timesfm_fintext_finetune_full: 0
 
 target:
   bar_minutes: 5
@@ -134,7 +149,7 @@ timesfm_fintext:
   progress_file_finetune: "outputs/progress/timesfm_fintext_finetune_progress.json"
 
   # Fine-tune options
-  finetune_mode: "linear_probe" # "full"
+  finetune_mode: "full" # "full"
   finetune_epochs: 10
   finetune_batch_size: 32
   finetune_lr: 0.0001
@@ -144,6 +159,6 @@ timesfm_fintext:
   finetune_ema_decay: 1.0
   finetune_internal_val_frac: 0.0
   finetune_early_stopping_patience: 5
-  finetune_output_suffix: "linear_probe"  # optional suffix for predictions/results/progress; defaults to finetune_mode when null
+  finetune_output_suffix: "full"  # optional suffix for predictions/results/progress; defaults to finetune_mode when null
 
 random_seed: 42

@@ -175,7 +175,9 @@ def generate_latex_tables(results: dict) -> str:
     latex.append("% Include \\usepackage{booktabs} in preamble\n\n")
 
     if "test_overall" in results:
-        df = results["test_overall"][["model", "rmse", "mae", "r2"]].sort_values("rmse")
+        df_overall = results["test_overall"].copy()
+        df_overall = df_overall[df_overall["model"] != "timesfm_fintext_finetune_linear_probe"]
+        df = df_overall[["model", "rmse", "mae", "r2", "qlike"]].sort_values("rmse")
         latex.append(generate_latex_table(df, "Overall Test Set Performance", "overall_performance"))
         latex.append("\n")
 

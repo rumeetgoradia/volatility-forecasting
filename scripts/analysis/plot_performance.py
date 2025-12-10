@@ -17,9 +17,6 @@ def plot_overall_performance(df: pd.DataFrame, output_dir: Path):
 
     pred_cols = [col for col in df.columns if col.startswith("pred_")]
 
-    # Drop base TimesFM if present; keep finetune and other models
-    pred_cols = [c for c in pred_cols if c != "pred_timesfm_fintext"]
-
     results = []
     for col in pred_cols:
         model = col.replace("pred_", "")
@@ -220,7 +217,11 @@ def main():
     plot_ensemble_weights(config, output_dir)
 
     print("\n4. Prediction scatter plots")
-    for model in ["lstm", "ensemble", "har_rv"]:
+    scatter_models = ["lstm", "ensemble", "har_rv"]
+    # Add finetuned TimesFM if present
+    if "pred_timesfm_fintext_finetune_full" in df.columns:
+        scatter_models.append("timesfm_fintext_finetune_full")
+    for model in scatter_models:
         plot_prediction_scatter(df, model, output_dir)
 
     print(f"\nAll figures saved to {output_dir}/")

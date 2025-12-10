@@ -231,6 +231,23 @@ def main():
             print(f"  Ensemble vs LSTM: NO significant difference (p={result['p_value']:.4f})")
             print(f"    Models are statistically equivalent")
 
+    # Explicit check: Ensemble vs TimesFM finetune (full)
+    ensemble_vs_tfmft = dm_overall[
+        ((dm_overall["model1"] == "ensemble") & (dm_overall["model2"] == "timesfm_fintext_finetune_full"))
+        | ((dm_overall["model1"] == "timesfm_fintext_finetune_full") & (dm_overall["model2"] == "ensemble"))
+    ]
+    if len(ensemble_vs_tfmft) > 0:
+        result = ensemble_vs_tfmft.iloc[0]
+        label = "Ensemble vs TimesFM FT (full)"
+        if result["significant"]:
+            print(f"  {label}: SIGNIFICANT difference (p={result['p_value']:.4f})")
+            print(f"    {result['better_model']} is better")
+        else:
+            print(f"  {label}: NO significant difference (p={result['p_value']:.4f})")
+            print("    Models are statistically equivalent")
+    else:
+        print("  Ensemble vs TimesFM FT (full): comparison not found (missing columns?)")
+
 
 if __name__ == "__main__":
     main()

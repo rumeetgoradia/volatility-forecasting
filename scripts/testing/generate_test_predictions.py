@@ -1,3 +1,4 @@
+import argparse
 import torch
 from torch.utils.data import DataLoader
 import pandas as pd
@@ -14,6 +15,7 @@ from models.tcn import TCNModel
 from models.moe import load_expert_models
 from models.gating import RegimeAwareFixedGating
 from models.precomputed_expert import PrecomputedExpert
+from typing import Dict
 
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
@@ -71,6 +73,7 @@ def generate_predictions_for_instrument(
         dataset, batch_size=128, shuffle=False, collate_fn=custom_collate_fn,
     )
 
+    # Load ensemble experts (MoE) as configured – this should stay on the full FT variant
     all_experts = load_expert_models(
         config, [instrument], dataset.get_feature_dim(), device, feature_cols=feature_cols,
     )
@@ -95,6 +98,33 @@ def generate_predictions_for_instrument(
     ensemble.to(device)
     ensemble.eval()
 
+    # Load additional finetune variants for evaluation (e.g., linear_probe) without using them in MoE
+    tcfg = config.get("timesfm_fintext", {})
+    active_suffix = str(tcfg.get("finetune_output_suffix") or tcfg.get("finetune_mode", "")).strip().replace(" ", "_")
+    candidate_suffixes = tcfg.get("finetune_extra_suffixes") or []
+    if not candidate_suffixes:
+        candidate_suffixes = ["full", "linear_probe"]
+
+    extra_ft_experts: Dict[str, PrecomputedExpert] = {}
+    for suffix in candidate_suffixes:
+        suffix_clean = str(suffix).strip().replace(" ", "_")
+        if suffix_clean == active_suffix:
+            continue
+
+        pred_path = Path("outputs/predictions") / f"timesfm_fintext_finetune_{suffix_clean}_{instrument}.csv"
+        if not pred_path.exists():
+            continue
+
+        dfp = pd.read_csv(pred_path)
+        extra_ft_experts[suffix_clean] = PrecomputedExpert(
+            preds_df=dfp,
+            value_col="predicted",
+            calibrated_col=None,
+            allowed_splits=None,
+            fuzzy_match_window_minutes=0,
+            fallback=float(pd.to_numeric(dfp["predicted"], errors="coerce").mean()),
+        )
+
     results = {
         "datetime": [],
         "actual": [],
@@ -105,6 +135,9 @@ def generate_predictions_for_instrument(
     for name in expert_names:
         results[f"pred_{name}"] = []
 
+    for suffix in extra_ft_experts:
+        results[f"pred_timesfm_fintext_finetune_{suffix}"] = []
+
     with torch.no_grad():
         for batch in loader:
             X_batch, y_batch, meta_batch = batch
@@ -112,22 +145,18 @@ def generate_predictions_for_instrument(
 
             timestamps = {'datetime_obj': meta_batch['datetime_obj']}
             regime = meta_batch.get("regime")
+            ts_iter = timestamps.get("datetime_obj") or timestamps.get("datetime")
 
             ensemble_output = ensemble(X_batch, timestamps=timestamps, regime=regime)
 
             for name in expert_names:
                 expert = expert_models[name]
-                ts_iter = None
-                if isinstance(timestamps, dict):
-                    ts_iter = timestamps.get("datetime_obj") or timestamps.get("datetime")
-                else:
-                    ts_iter = timestamps
 
                 if isinstance(expert, PrecomputedExpert):
                     if ts_iter is None:
                         raise ValueError("PrecomputedExpert requires timestamp list")
                     expert_output = expert(X_batch, timestamps=ts_iter)
-                elif name in ('chronos_fintext', 'timesfm_fintext', 'timesfm_fintext_finetune'):
+                elif name in ('chronos_fintext', 'timesfm_fintext') or name.startswith('timesfm_fintext_finetune'):
                     expert_output = expert(X_batch, timestamps=timestamps)
                 else:
                     expert_output = expert(X_batch)
@@ -140,6 +169,13 @@ def generate_predictions_for_instrument(
             results["datetime"].extend(meta_batch['datetime_obj'])
             results["actual"].extend(y_batch.numpy().flatten())
             results["pred_ensemble"].extend(ensemble_output.cpu().numpy().flatten())
+
+            # Add additional fine-tune variant predictions (not part of the MoE weights)
+            for suffix, ft_expert in extra_ft_experts.items():
+                ft_output = ft_expert(X_batch, timestamps=ts_iter)
+                if ft_output.size(0) == 1:
+                    ft_output = ft_output.expand(X_batch.size(0), -1)
+                results[f"pred_timesfm_fintext_finetune_{suffix}"].extend(ft_output.cpu().numpy().flatten())
 
             if regime is not None:
                 if torch.is_tensor(regime):
@@ -154,21 +190,36 @@ def generate_predictions_for_instrument(
 
 
 def main():
-    print("GENERATING TEST SET PREDICTIONS")
+    parser = argparse.ArgumentParser(description="Generate predictions for validation or test splits")
+    parser.add_argument("--split", type=str, default="test", choices=["val", "test"], help="Dataset split to use")
+    args = parser.parse_args()
+
+    split_name = args.split.lower()
+    print(f"GENERATING {split_name.upper()} SET PREDICTIONS")
 
     config = load_config()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     print(f"Using device: {device}")
-    print("Loading test data")
+    print(f"Loading {split_name} data")
 
-    test_df = pd.read_parquet("data/processed/test.parquet")
+    data_path = Path("data/processed")
+    regimes_path = Path("data/regimes")
+    split_file = data_path / f"{split_name}.parquet"
+    regimes_file = regimes_path / f"regime_labels_{split_name}.csv"
+
+    if not split_file.exists():
+        raise FileNotFoundError(f"Missing split file: {split_file}")
+    if not regimes_file.exists():
+        raise FileNotFoundError(f"Missing regime file: {regimes_file}")
+
+    test_df = pd.read_parquet(split_file)
     test_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     test_df["datetime"] = pd.to_datetime(test_df["datetime"], errors='coerce')
     if test_df["datetime"].dt.tz is not None:
         test_df["datetime"] = test_df["datetime"].dt.tz_localize(None)
 
-    test_regimes = pd.read_csv("data/regimes/regime_labels_test.csv")
+    test_regimes = pd.read_csv(regimes_file)
     test_regimes["datetime"] = pd.to_datetime(test_regimes["datetime"], utc=True).dt.tz_localize(None)
 
     test_df = test_df.merge(test_regimes, on=["datetime", "Future"], how="left")
@@ -208,7 +259,7 @@ def main():
     output_dir = Path("outputs/test_predictions")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_file = output_dir / "all_models_test_predictions.csv"
+    output_file = output_dir / f"all_models_{split_name}_predictions.csv"
     combined.to_csv(output_file, index=False)
 
     print(f"\nSaved predictions to {output_file}")

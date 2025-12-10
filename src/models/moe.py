@@ -13,6 +13,7 @@ from models.lstm import LSTMModel
 from models.tcn import TCNModel
 from models.rf import RandomForestWrapper
 from models.precomputed_expert import PrecomputedExpert
+from data.dataset import create_datasets
 import joblib
 
 
@@ -60,8 +61,8 @@ class MixtureOfExperts(nn.Module):
                 if isinstance(expert, PrecomputedExpert):
                     if ts_iter is None:
                         raise ValueError("PrecomputedExpert requires timestamps to align predictions.")
-                    expert_output = expert(x, timestamps=ts_iter)
-                elif name in ("chronos_fintext", "timesfm_fintext"):
+                    output = expert(x, timestamps=ts_iter)
+                elif name in ("chronos_fintext", "timesfm_fintext") or name.startswith("timesfm_fintext_finetune"):
                     output = expert(x, timestamps=timestamps)
                 else:
                     output = expert(x)
@@ -103,7 +104,7 @@ def load_expert_models(
         instrument_experts = {}
 
         train_df = pd.read_parquet("data/processed/train.parquet")
-        inst_train_df = train_df[train_df["Future"] == instrument]
+        inst_train_df = train_df[train_df["Future"] == instrument].copy()
         target_col = config["target"].get("target_col", "RV_1H")
         target_values = inst_train_df[target_col].values
         target_values = target_values[np.isfinite(target_values) & (target_values > 0)]
@@ -113,11 +114,88 @@ def load_expert_models(
             if expert_name == "har_rv":
                 model_path = models_dir / f"har_rv_{instrument}.pkl"
                 if model_path.exists():
-                    model = HARRV.load(str(model_path))
-                    instrument_experts["har_rv"] = HARRVWrapper(
-                        model,
-                        feature_cols=feature_cols,
-                    )
+                    try:
+                        model = HARRV.load(str(model_path))
+                        data_path = Path(config["data"]["processed_path"])
+                        val_df = pd.read_parquet(data_path / "val.parquet").copy()
+                        test_df = pd.read_parquet(data_path / "test.parquet").copy()
+
+                        for label, dfp in (("val", val_df), ("test", test_df), ("train", inst_train_df)):
+                            dfp = dfp.replace([np.inf, -np.inf], np.nan)
+                            dfp["datetime"] = pd.to_datetime(dfp["datetime"], errors="coerce")
+                            if dfp["datetime"].dt.tz is not None:
+                                dfp["datetime"] = dfp["datetime"].dt.tz_localize(None)
+                            if label == "val":
+                                val_df = dfp
+                            elif label == "test":
+                                test_df = dfp
+                            else:
+                                inst_train_df = dfp
+
+                        har_cols = getattr(model, "feature_cols", ["RV_H1", "RV_H6", "RV_H24"])
+                        feat_list = feature_cols or har_cols
+
+                        train_ds, val_ds, test_ds = create_datasets(
+                            inst_train_df,
+                            val_df,
+                            test_df,
+                            feature_cols=feat_list,
+                            target_col=target_col,
+                            sequence_length=config["models"]["lstm"]["sequence_length"],
+                            instrument=instrument,
+                            return_metadata=True,
+                            scale_features=True,
+                        )
+
+                        # Map HAR columns to indices in feature list
+                        idxs = []
+                        for c in har_cols:
+                            if c in feat_list:
+                                idxs.append(feat_list.index(c))
+                        if len(idxs) != len(har_cols):
+                            raise ValueError("HAR feature indices could not be resolved for wrapper")
+
+                        preds_frames = []
+                        for split_name, ds in (("val", val_ds), ("test", test_ds)):
+                            if len(ds) == 0:
+                                continue
+                            X_rows = []
+                            ts_list = []
+                            for idx in ds.valid_indices:
+                                row = ds.features_scaled[idx, idxs]
+                                if not np.all(np.isfinite(row)):
+                                    continue
+                                X_rows.append(row)
+                                ts_list.append(ds.dates_dt[idx])
+                            if not X_rows:
+                                continue
+                            X_df = pd.DataFrame(X_rows, columns=har_cols)
+                            preds = model.predict(X_df)
+                            pf = pd.DataFrame({
+                                "datetime": ts_list,
+                                "Future": instrument,
+                                "split": split_name,
+                                "predicted": preds,
+                            })
+                            preds_frames.append(pf)
+
+                        if preds_frames:
+                            dfp = pd.concat(preds_frames, ignore_index=True)
+                            instrument_experts["har_rv"] = PrecomputedExpert(
+                                preds_df=dfp,
+                                value_col="predicted",
+                                calibrated_col=None,
+                                allowed_splits=None,
+                                fuzzy_match_window_minutes=0,
+                                fallback=float(pd.to_numeric(dfp["predicted"], errors="coerce").mean()),
+                            )
+                        else:
+                            instrument_experts["har_rv"] = HARRVWrapper(
+                                model,
+                                feature_cols=feature_cols,
+                            )
+                    except Exception as e:
+                        print(f"Skipping HAR-RV for {instrument}: {e}")
 
             elif expert_name == "lstm":
                 model_path = models_dir / f"lstm_{instrument}.pt"
@@ -169,11 +247,7 @@ def load_expert_models(
                     except Exception as e:
                         print(f"Skipping RF for {instrument}: {e}")
 
-            elif expert_name in (
-                "chronos_fintext",
-                "timesfm_fintext",
-                "timesfm_fintext_finetune",
-            ):
+            elif expert_name in ("chronos_fintext", "timesfm_fintext") or expert_name.startswith("timesfm_fintext_finetune"):
                 pred_dir = Path("outputs/predictions")
                 tcfg = config.get("timesfm_fintext", {})
                 raw_suffix = tcfg.get("finetune_output_suffix")
@@ -181,9 +255,12 @@ def load_expert_models(
                     raw_suffix = tcfg.get("finetune_mode", "")
                 suffix = str(raw_suffix).strip().replace(" ", "_") if raw_suffix is not None else ""
 
-                if expert_name == "timesfm_fintext_finetune":
+                if expert_name.startswith("timesfm_fintext_finetune"):
+                    explicit_suffix = expert_name.replace("timesfm_fintext_finetune", "").strip("_")
                     preferred_prefixes = []
-                    if suffix:
+                    if explicit_suffix:
+                        preferred_prefixes.append(f"timesfm_fintext_finetune_{explicit_suffix}")
+                    elif suffix:
                         preferred_prefixes.append(f"timesfm_fintext_finetune_{suffix}")
                     preferred_prefixes.append("timesfm_fintext_finetune")
                 elif expert_name == "timesfm_fintext":

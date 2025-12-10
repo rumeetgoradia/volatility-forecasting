@@ -42,14 +42,18 @@ def clean_datetime_for_dataset(df: pd.DataFrame) -> pd.DataFrame:
 def load_data(config: dict):
     data_path = Path(config["data"]["processed_path"])
 
-    val_df = pd.read_parquet(data_path / "val.parquet")
-    test_df = pd.read_parquet(data_path / "test.parquet")
+    val_df = pd.read_parquet(data_path / "val.parquet").copy()
+    test_df = pd.read_parquet(data_path / "test.parquet").copy()
 
-    for df in (val_df, test_df):
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    for name, df in (("val", val_df), ("test", test_df)):
+        df = df.replace([np.inf, -np.inf], np.nan)
         df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(
             None
         )
+        if name == "val":
+            val_df = df
+        else:
+            test_df = df
 
     return val_df, test_df
 
@@ -140,6 +144,15 @@ def evaluate_ensemble_on_instrument(
         expert_names=expert_names,
         regime_weights=regime_weights,
     )
+    # Debug: show normalized weights being applied for this instrument
+    try:
+        weights_np = gating.regime_weights.detach().cpu().numpy()
+        print(f"[weights] {instrument} experts: {expert_names}")
+        for ridx, row in enumerate(weights_np):
+            pretty = ", ".join(f"{n}:{w:.3f}" for n, w in zip(expert_names, row))
+            print(f"  regime {ridx}: {pretty}")
+    except Exception:
+        pass
 
     ensemble = MixtureOfExperts(
         expert_models=expert_models,
