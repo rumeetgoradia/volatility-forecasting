@@ -138,6 +138,21 @@ def generate_predictions_for_instrument(
     for suffix in extra_ft_experts:
         results[f"pred_timesfm_fintext_finetune_{suffix}"] = []
 
+    # Optional Chronos FinText precomputed expert (for reporting; not used in MoE unless configured)
+    chronos_expert: Dict[str, PrecomputedExpert] = {}
+    chronos_path = Path("outputs/predictions") / f"chronos_fintext_{instrument}.csv"
+    if chronos_path.exists():
+        dfc = pd.read_csv(chronos_path)
+        chronos_expert["chronos_fintext"] = PrecomputedExpert(
+            preds_df=dfc,
+            value_col="predicted",
+            calibrated_col=None,
+            allowed_splits=None,
+            fuzzy_match_window_minutes=0,
+            fallback=float(pd.to_numeric(dfc["predicted"], errors="coerce").mean()),
+        )
+        results["pred_chronos_fintext"] = []
+
     with torch.no_grad():
         for batch in loader:
             X_batch, y_batch, meta_batch = batch
@@ -176,6 +191,14 @@ def generate_predictions_for_instrument(
                 if ft_output.size(0) == 1:
                     ft_output = ft_output.expand(X_batch.size(0), -1)
                 results[f"pred_timesfm_fintext_finetune_{suffix}"].extend(ft_output.cpu().numpy().flatten())
+
+            # Add Chronos predictions if available
+            if chronos_expert:
+                c_exp = chronos_expert["chronos_fintext"]
+                c_out = c_exp(X_batch, timestamps=ts_iter)
+                if c_out.size(0) == 1:
+                    c_out = c_out.expand(X_batch.size(0), -1)
+                results["pred_chronos_fintext"].extend(c_out.cpu().numpy().flatten())
 
             if regime is not None:
                 if torch.is_tensor(regime):
