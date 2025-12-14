@@ -22,23 +22,23 @@ def compute_regime_performance_matrix(df: pd.DataFrame):
 
     for model in model_names:
         row = {"model": model}
-
         for regime in regimes:
-            regime_df = df[df["regime"] == regime]
-
-            mask = regime_df["actual"].notna() & regime_df[f"pred_{model}"].notna()
-
+            # existing mask logic
             if mask.sum() > 0:
                 actual = regime_df.loc[mask, "actual"].values
                 pred = regime_df.loc[mask, f"pred_{model}"].values
-
-                rmse = np.sqrt(np.mean((actual - pred)**2))
-                row[regime_names.get(regime, f"Regime {regime}")] = rmse
+                
+                if metric == "rmse":
+                    score = np.sqrt(np.mean((actual - pred)**2))
+                elif metric == "qlike":
+                    # QLIKE Loss
+                    ratio = actual / pred
+                    score = np.mean(ratio - np.log(ratio) - 1)
+                
+                row[regime_names.get(regime, f"Regime {regime}")] = score
             else:
                 row[regime_names.get(regime, f"Regime {regime}")] = np.nan
-
         results.append(row)
-
     return pd.DataFrame(results)
 
 
@@ -155,9 +155,14 @@ def main():
 
     print(f"Loaded {len(df)} predictions")
 
-    print("\n1. Performance Matrix (RMSE by Model and Regime)")
+    print("\n1a. Performance Matrix (RMSE by Model and Regime)")
     perf_matrix = compute_regime_performance_matrix(df)
     print(perf_matrix.to_string(index=False))
+
+    print("\n1b. Performance Matrix (QLIKE)")
+    perf_matrix_qlike = compute_regime_performance_matrix(df, metric="qlike")
+    print(perf_matrix_qlike.to_string(index=False))
+    perf_matrix_qlike.to_csv(results_dir / "regime_performance_matrix_qlike.csv", index=False)
 
     print("\n2. Best Model Per Regime")
     best_per_regime = identify_best_model_per_regime(df)

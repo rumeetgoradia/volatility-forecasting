@@ -187,6 +187,43 @@ def plot_prediction_scatter(df: pd.DataFrame, model: str, output_dir: Path):
 
     print(f"Saved: {output_dir}/scatter_{model}.png")
 
+def plot_cumulative_error_diff(df: pd.DataFrame, benchmark: str, candidate: str, output_dir: Path):
+    """
+    Plot cumulative difference in squared errors (Benchmark - Candidate).
+    Rising line = Candidate is outperforming Benchmark over time.
+    """
+    df = df.copy().sort_values("datetime")
+    
+    col_bench = f"pred_{benchmark}"
+    col_cand = f"pred_{candidate}"
+    
+    if col_bench not in df.columns or col_cand not in df.columns:
+        return
+
+    mask = df["actual"].notna() & df[col_bench].notna() & df[col_cand].notna()
+    df_clean = df[mask].copy()
+    df_clean["datetime"] = pd.to_datetime(df_clean["datetime"])
+    se_bench = (df_clean["actual"] - df_clean[col_bench])**2
+    se_cand = (df_clean["actual"] - df_clean[col_cand])**2
+    
+    # Cumulative Difference (Positive = Candidate is better)
+    cum_diff = (se_bench - se_cand).cumsum()
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(df_clean["datetime"], cum_diff, label=f"{candidate} vs {benchmark}", linewidth=1.5, color="#2ecc71")
+    
+    ax.axhline(0, color="black", linestyle="--", alpha=0.5)
+    ax.set_title(f"Cumulative Outperformance: {candidate.upper()} vs {benchmark.upper()}\n(Rising Line = {candidate.upper()} is better)")
+    ax.set_ylabel("Cumulative Squared Error Difference")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    outfile = output_dir / f"cum_diff_{candidate}_vs_{benchmark}.png"
+    plt.savefig(outfile, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved: {outfile}")
 
 def main():
     import yaml
@@ -223,6 +260,10 @@ def main():
         scatter_models.append("timesfm_fintext_finetune_full")
     for model in scatter_models:
         plot_prediction_scatter(df, model, output_dir)
+
+    print("\n5. Cumulative Error Plots")
+    plot_cumulative_error_diff(df, "har_rv", "ensemble", output_dir)
+    plot_cumulative_error_diff(df, "lstm", "ensemble", output_dir)
 
     print(f"\nAll figures saved to {output_dir}/")
 
