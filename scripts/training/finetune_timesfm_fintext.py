@@ -167,6 +167,7 @@ def rolling_forecast(
     pred_floor: float = 1e-6,
     scale_factor: float = 1.0,
     splits=("val", "test"),
+    batch_size: int = 64
 ):
     if len(instrument_df) <= context_bars:
         raise ValueError(f"Not enough history for {instrument_df['Future'].iloc[0]}")
@@ -196,61 +197,60 @@ def rolling_forecast(
     param_device = next(model.parameters()).device
     param_dtype = next(model.parameters()).dtype
 
-    for idx in iterator:
-        split = split_labels[idx]
-        if split not in splits:
-            continue
+    freq_tensor = torch.tensor([freq_id], dtype=torch.long, device=param_device)
 
-        if not np.isfinite(target_values[idx]):
-            continue
-
-        context = series[idx - context_bars : idx]
-        context = np.nan_to_num(context, nan=1e-8, posinf=1e-8, neginf=1e-8)
-        context = np.clip(context, 1e-8, None)
+    # Iterate in batches
+    for i in tqdm(range(0, len(valid_indices), batch_size), desc=f"{instrument_df['Future'].iloc[0]}", leave=False):
+        batch_idxs = valid_indices[i : i + batch_size]
+        
+        batch_contexts = []
+        for idx in batch_idxs:
+            context = series[idx - context_bars : idx]
+            context = np.nan_to_num(context, nan=1e-8, posinf=1e-8, neginf=1e-8)
+            context = np.clip(context, 1e-8, None)
+            batch_contexts.append(torch.tensor(context, dtype=param_dtype, device=param_device))
 
         try:
-            ctx_tensor = torch.tensor(context, dtype=param_dtype, device=param_device)
-            freq_tensor = torch.tensor([freq_id], dtype=torch.long, device=param_device)
-
             with torch.no_grad():
                 outputs = model(
-                    past_values=[ctx_tensor],
-                    freq=freq_tensor,
+                    past_values=batch_contexts,
+                    freq=freq_tensor.expand(len(batch_contexts)),
                     forecast_context_len=None,
                     truncate_negative=False,
                     return_dict=True,
                 )
 
             if outputs.mean_predictions is not None:
-                forecast = outputs.mean_predictions.detach().float().cpu().numpy().reshape(-1)
+                forecasts = outputs.mean_predictions.detach().float().cpu().numpy()
             elif outputs.full_predictions is not None:
                 full_preds = outputs.full_predictions.detach().float().cpu().numpy()
-                forecast = full_preds[..., 0].reshape(-1)
+                forecasts = full_preds[..., 0]
             else:
-                raise ValueError("TimesFM output missing predictions")
-
-            forecast_h = forecast[:prediction_length]
-
-            if input_representation == "variance":
-                forecast_var = float(np.sum(forecast_h) * float(scale_factor))
-                pred_rv = float(np.sqrt(max(forecast_var, 0.0)))
-            elif input_representation == "rv":
-                pred_rv = float(np.mean(forecast_h) * float(scale_factor))
-            else:
-                raise ValueError(f"Unknown input_representation: {input_representation}")
-
-            if not np.isfinite(pred_rv):
                 continue
 
-            pred_rv = max(pred_rv, pred_floor)
+            for j, idx in enumerate(batch_idxs):
+                forecast_h = forecasts[j].reshape(-1)[:prediction_length]
 
-            preds.append(pred_rv)
-            actuals.append(float(target_values[idx]))
-            pred_times.append(timestamps[idx])
-            pred_splits.append(split)
+                if input_representation == "variance":
+                    forecast_var = float(np.sum(forecast_h) * float(scale_factor))
+                    pred_rv = float(np.sqrt(max(forecast_var, 0.0)))
+                elif input_representation == "rv":
+                    pred_rv = float(np.mean(forecast_h) * float(scale_factor))
+                else:
+                    pred_rv = 0.0
+
+                if not np.isfinite(pred_rv):
+                    continue
+
+                pred_rv = max(pred_rv, pred_floor)
+
+                preds.append(pred_rv)
+                actuals.append(float(target_values[idx]))
+                pred_times.append(timestamps[idx])
+                pred_splits.append(split_labels[idx])
 
         except Exception as e:
-            print(f"Prediction failed at idx {idx}: {e}")
+            print(f"Batch prediction failed: {e}")
             continue
 
     df_preds = pd.DataFrame({
@@ -361,6 +361,11 @@ class FineTuneTimesFM:
         dtype = next(self.model.parameters()).dtype
 
         train_loader = DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True)
+        
+        # Create validation loader
+        val_loader = None
+        if val_dataset:
+            val_loader = DataLoader(val_dataset, batch_size=self.cfg.batch_size, shuffle=False)
 
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         if not trainable_params:
@@ -372,7 +377,6 @@ class FineTuneTimesFM:
             weight_decay=self.cfg.weight_decay,
         )
         mse = torch.nn.MSELoss()
-
         freq_tensor = torch.tensor([self.freq_id], dtype=torch.long, device=device)
 
         def forward_batch(x_batch: torch.Tensor) -> torch.Tensor:
@@ -407,17 +411,22 @@ class FineTuneTimesFM:
             pred_rv = torch.clamp(pred_rv, min=1e-8)
             return pred_rv
 
-        self.model.train()
+        # State tracking for early stopping
+        best_val_loss = float("inf")
+        patience_counter = 0
+        best_state = None
+
         for epoch in range(self.cfg.n_epochs):
+            self.model.train()
             total_loss = 0.0
             n_steps = 0
 
+            # Training Loop
             for x_np, y_np in train_loader:
                 x = x_np.to(device=device, dtype=dtype) if isinstance(x_np, torch.Tensor) else torch.tensor(x_np, dtype=dtype, device=device)
                 y = y_np.to(device=device, dtype=dtype) if isinstance(y_np, torch.Tensor) else torch.tensor(y_np, dtype=dtype, device=device)
 
                 optimizer.zero_grad()
-
                 pred_rv = forward_batch(x)
                 y = torch.clamp(y, min=1e-8)
 
@@ -430,10 +439,42 @@ class FineTuneTimesFM:
 
                 total_loss += float(loss.detach().cpu())
                 n_steps += 1
+            
+            avg_train_loss = total_loss / max(n_steps, 1)
 
-            if n_steps > 0:
-                print(f"  Epoch {epoch + 1}/{self.cfg.n_epochs}: train_loss={total_loss / max(n_steps, 1):.6f}")
+            # Validation Loop
+            avg_val_loss = float("inf")
+            if val_loader:
+                self.model.eval()
+                val_loss_sum = 0.0
+                val_steps = 0
+                with torch.no_grad():
+                    for x_np, y_np in val_loader:
+                        x = x_np.to(device=device, dtype=dtype) if isinstance(x_np, torch.Tensor) else torch.tensor(x_np, dtype=dtype, device=device)
+                        y = y_np.to(device=device, dtype=dtype) if isinstance(y_np, torch.Tensor) else torch.tensor(y_np, dtype=dtype, device=device)
+                        pred = forward_batch(x)
+                        y = torch.clamp(y, min=1e-8)
+                        val_loss_sum += float(mse(pred, y).cpu())
+                        val_steps += 1
+                avg_val_loss = val_loss_sum / max(val_steps, 1)
+            
+            print(f"  Epoch {epoch + 1}/{self.cfg.n_epochs}: train_loss={avg_train_loss:.6f} val_loss={avg_val_loss:.6f}")
 
+            # Early Stopping Logic
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                patience_counter = 0
+                best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+            else:
+                patience_counter += 1
+                if patience_counter >= self.cfg.early_stopping_patience:
+                    print(f"  Early stopping triggered at epoch {epoch+1}")
+                    break
+        
+        # Restore best model
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            self.model.to(device)
         self.model.eval()
 
 
@@ -554,6 +595,7 @@ def finetune_timesfm_for_instrument(instrument: str, panel: pd.DataFrame, config
         pred_floor=pred_floor,
         scale_factor=series_scale,
         splits=("val", "test"),
+        batch_size=64,
     )
 
     dyn_floor = compute_dynamic_floor(

@@ -141,6 +141,7 @@ def rolling_forecast(
     pred_floor: float = 1e-6,
     scale_factor: float = 1.0,
     splits=("val", "test"),
+    batch_size: int = 64, # ADDED Batch size argument
 ):
     if len(instrument_df) <= context_bars:
         raise ValueError(f"Not enough history for {instrument_df['Future'].iloc[0]}")
@@ -148,8 +149,6 @@ def rolling_forecast(
     if series_values is not None:
         series = np.asarray(series_values, dtype=float)
     else:
-        if series_col not in instrument_df.columns:
-            raise ValueError(f"Series column '{series_col}' not found")
         series = instrument_df[series_col].astype(float).values
 
     timestamps = instrument_df["datetime"].values
@@ -158,73 +157,78 @@ def rolling_forecast(
 
     series = np.clip(series, 1e-8, None)
 
+    # Pre-calculate valid indices to batch them
+    valid_indices = []
+    for idx in range(context_bars, len(series)):
+        if split_labels[idx] in splits and np.isfinite(target_values[idx]):
+            valid_indices.append(idx)
+
     preds = []
     actuals = []
     pred_times = []
     pred_splits = []
 
-    eval_indices = list(range(context_bars, len(series)))
-
-    iterator = tqdm(eval_indices, desc=f"{instrument_df['Future'].iloc[0]}", leave=False)
+    if not valid_indices:
+        return pd.DataFrame()
 
     param_device = next(model.parameters()).device
     param_dtype = next(model.parameters()).dtype
+    freq_tensor = torch.tensor([freq_id], dtype=torch.long, device=param_device)
 
-    for idx in iterator:
-        split = split_labels[idx]
-        if split not in splits:
-            continue
-
-        if not np.isfinite(target_values[idx]):
-            continue
-
-        context = series[idx - context_bars : idx]
-        context = np.nan_to_num(context, nan=1e-8, posinf=1e-8, neginf=1e-8)
-        context = np.clip(context, 1e-8, None)
+    # Iterate in batches
+    for i in tqdm(range(0, len(valid_indices), batch_size), desc=f"{instrument_df['Future'].iloc[0]}", leave=False):
+        batch_idxs = valid_indices[i : i + batch_size]
+        
+        batch_contexts = []
+        for idx in batch_idxs:
+            context = series[idx - context_bars : idx]
+            context = np.nan_to_num(context, nan=1e-8, posinf=1e-8, neginf=1e-8)
+            context = np.clip(context, 1e-8, None)
+            batch_contexts.append(torch.tensor(context, dtype=param_dtype, device=param_device))
 
         try:
-            ctx_tensor = torch.tensor(context, dtype=param_dtype, device=param_device)
-            freq_tensor = torch.tensor([freq_id], dtype=torch.long, device=param_device)
-
             with torch.no_grad():
+                # Pass list of tensors for batch inference
                 outputs = model(
-                    past_values=[ctx_tensor],
-                    freq=freq_tensor,
+                    past_values=batch_contexts,
+                    freq=freq_tensor.expand(len(batch_contexts)),
                     forecast_context_len=None,
                     truncate_negative=False,
                     return_dict=True,
                 )
 
             if outputs.mean_predictions is not None:
-                forecast = outputs.mean_predictions.detach().float().cpu().numpy().reshape(-1)
+                forecasts = outputs.mean_predictions.detach().float().cpu().numpy()
             elif outputs.full_predictions is not None:
                 full_preds = outputs.full_predictions.detach().float().cpu().numpy()
-                forecast = full_preds[..., 0].reshape(-1)
+                forecasts = full_preds[..., 0]
             else:
-                raise ValueError("TimesFM output missing predictions")
-
-            forecast_h = forecast[:prediction_length]
-
-            if input_representation == "variance":
-                forecast_var = float(np.sum(forecast_h) * float(scale_factor))
-                pred_rv = float(np.sqrt(max(forecast_var, 0.0)))
-            elif input_representation == "rv":
-                pred_rv = float(np.mean(forecast_h) * float(scale_factor))
-            else:
-                raise ValueError(f"Unknown input_representation: {input_representation}")
-
-            if not np.isfinite(pred_rv):
                 continue
 
-            pred_rv = max(pred_rv, pred_floor)
+            # Map batch results back to individual records
+            for j, idx in enumerate(batch_idxs):
+                forecast_h = forecasts[j].reshape(-1)[:prediction_length]
 
-            preds.append(pred_rv)
-            actuals.append(float(target_values[idx]))
-            pred_times.append(timestamps[idx])
-            pred_splits.append(split)
+                if input_representation == "variance":
+                    forecast_var = float(np.sum(forecast_h) * float(scale_factor))
+                    pred_rv = float(np.sqrt(max(forecast_var, 0.0)))
+                elif input_representation == "rv":
+                    pred_rv = float(np.mean(forecast_h) * float(scale_factor))
+                else:
+                    pred_rv = 0.0
+
+                if not np.isfinite(pred_rv):
+                    continue
+
+                pred_rv = max(pred_rv, pred_floor)
+
+                preds.append(pred_rv)
+                actuals.append(float(target_values[idx]))
+                pred_times.append(timestamps[idx])
+                pred_splits.append(split_labels[idx])
 
         except Exception as e:
-            print(f"Prediction failed at idx {idx}: {e}")
+            print(f"Batch prediction failed: {e}")
             continue
 
     df_preds = pd.DataFrame({
@@ -300,6 +304,7 @@ def train_timesfm_for_instrument(instrument: str, panel: pd.DataFrame, config: d
         pred_floor=pred_floor,
         scale_factor=series_scale,
         splits=("val", "test"),
+        batch_size=64,
     )
 
     dyn_floor = compute_dynamic_floor(
