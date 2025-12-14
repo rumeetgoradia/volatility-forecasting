@@ -11,8 +11,6 @@ The repository is organized as follows:
 ```text
 .
 |-- config/             # Hyperparameter and system configuration
-|-- data/               # Data storage (raw, processed, and regime artifacts)
-|-- outputs/            # Model checkpoints, figures, and evaluation results
 |-- scripts/            # Executable scripts for training and evaluation
 |   |-- analysis/       # Post-hoc analysis (ablation, plotting, DM tests, reports)
 |   |-- data/           # ETL and regime detection pipelines
@@ -23,6 +21,8 @@ The repository is organized as follows:
 |   |-- evaluation/     # Metrics (QLIKE, RMSE) and calibration
 |   |-- models/         # Model architectures (LSTM, TCN, MoE, Wrappers)
 |   `-- regimes/        # Clustering logic (HMM, K-Means)
+|   |-- training/
+|   |-- visualization/
 |-- pyproject.toml      # Project dependencies and metadata
 `-- uv.lock             # Dependency lockfile
 ```
